@@ -1,66 +1,21 @@
-/// A Claude Code (or other agent) pane's status, as written by an external
-/// hook into the tmux pane option `@agent_status`. Ordered least-to-most
-/// severe so the derived `Ord` can be used to pick the worst value when
-/// folding a session's panes down to one badge: `Attention` (blocked on
-/// you) outranks `Waiting` (its turn just ended) outranks `Working` (still running).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum AgentStatus {
-    Working,
-    Waiting,
-    Attention,
-}
-
-impl AgentStatus {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "working" => Some(Self::Working),
-            "waiting" => Some(Self::Waiting),
-            "attention" => Some(Self::Attention),
-            _ => None,
-        }
-    }
-}
-
-/// How many panes in a session sit at each agent status. Used to render a
-/// count badge (e.g. "2 waiting, 1 working") instead of collapsing a
-/// multi-agent session down to a single pane's state.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AgentPaneCounts {
-    pub working: u32,
-    pub waiting: u32,
-    pub attention: u32,
-}
-
-impl AgentPaneCounts {
-    pub fn total(&self) -> u32 {
-        self.working + self.waiting + self.attention
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
+    /// Stable tmux pane id (for example `%12`).
     pub id: String,
+    /// Stable tmux window id containing this pane (for example `@3`).
+    pub window_id: String,
     pub name: String,
     pub attached: bool,
-    pub window_count: u32,
-    pub current_window: Option<String>,
-    pub last_activity: Option<String>,
+    pub bell: bool,
     pub preview: Vec<String>,
     pub preview_error: Option<String>,
-    /// The worst-ranked status among this session's panes, or `None` if no
-    /// pane has ever reported one.
-    pub agent_status: Option<AgentStatus>,
-    /// Unix timestamp (seconds) of the oldest pane at `agent_status`'s rank
-    /// — i.e. how long the most-neglected pane has held that status.
-    pub agent_status_since: Option<i64>,
-    pub agent_pane_counts: AgentPaneCounts,
 }
 
 #[derive(Debug)]
 pub struct App {
     pub sessions: Vec<Session>,
     pub selected_index: usize,
-    pub current_session_name: Option<String>,
+    pub current_pane_id: Option<String>,
     pub should_quit: bool,
     pub should_switch: bool,
     pub error: Option<String>,
@@ -77,16 +32,16 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(sessions: Vec<Session>, current_session_name: Option<String>) -> Self {
-        let selected_index = current_session_name
+    pub fn new(sessions: Vec<Session>, current_pane_id: Option<String>) -> Self {
+        let selected_index = current_pane_id
             .as_ref()
-            .and_then(|name| sessions.iter().position(|session| &session.name == name))
+            .and_then(|id| sessions.iter().position(|pane| &pane.id == id))
             .unwrap_or(0);
 
         Self {
             sessions,
             selected_index,
-            current_session_name,
+            current_pane_id,
             should_quit: false,
             should_switch: false,
             error: None,
@@ -162,7 +117,7 @@ impl App {
     }
 
     pub fn replace_sessions(&mut self, sessions: Vec<Session>) {
-        let selected_name = self.selected_session().map(|session| session.name.clone());
+        let selected_id = self.selected_session().map(|session| session.id.clone());
         self.sessions = sessions;
 
         if self.visible_session_count() == 0 {
@@ -170,11 +125,11 @@ impl App {
             return;
         }
 
-        self.selected_index = selected_name
-            .and_then(|name| {
+        self.selected_index = selected_id
+            .and_then(|id| {
                 self.visible_sessions()
                     .into_iter()
-                    .position(|session| session.name == name)
+                    .position(|pane| pane.id == id)
             })
             .unwrap_or_else(|| self.selected_index.min(self.visible_session_count() - 1));
     }
@@ -201,14 +156,20 @@ impl App {
     }
 
     pub fn move_left(&mut self) {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
+        let visible_count = self.visible_session_count();
+        if visible_count == 0 {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = (self.selected_index + visible_count - 1) % visible_count;
         }
     }
 
     pub fn move_right(&mut self) {
-        if self.selected_index + 1 < self.visible_session_count() {
-            self.selected_index += 1;
+        let visible_count = self.visible_session_count();
+        if visible_count == 0 {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = (self.selected_index + 1) % visible_count;
         }
     }
 
@@ -235,27 +196,6 @@ impl App {
     }
 }
 
-/// Reorders sessions so the ones an agent is waiting on you for lead the
-/// grid: `Attention` first, then `Waiting`, then `Working`, then sessions
-/// with no agent at all. Within a rank, the longest-waiting session (oldest
-/// `agent_status_since`) sorts first, so a neglected pane doesn't get
-/// buried under one that only just finished. Stable, so untracked sessions
-/// keep tmux's own ordering relative to each other.
-pub fn sort_sessions_by_agent_status(sessions: &mut [Session]) {
-    sessions.sort_by_key(|session| {
-        let rank = match session.agent_status {
-            Some(AgentStatus::Attention) => 3,
-            Some(AgentStatus::Waiting) => 2,
-            Some(AgentStatus::Working) => 1,
-            None => 0,
-        };
-        (
-            std::cmp::Reverse(rank),
-            session.agent_status_since.unwrap_or(i64::MAX),
-        )
-    });
-}
-
 fn fuzzy_matches(name: &str, query: &str) -> bool {
     let query = query.to_lowercase();
     if query.is_empty() {
@@ -275,94 +215,45 @@ mod tests {
 
     fn session(name: &str) -> Session {
         Session {
-            id: format!("${name}"),
+            id: format!("%{name}"),
+            window_id: format!("@{name}"),
             name: name.to_string(),
             attached: false,
-            window_count: 1,
-            current_window: None,
-            last_activity: None,
+            bell: false,
             preview: Vec::new(),
             preview_error: None,
-            agent_status: None,
-            agent_status_since: None,
-            agent_pane_counts: AgentPaneCounts::default(),
-        }
-    }
-
-    fn session_with_agent_status(
-        name: &str,
-        status: Option<AgentStatus>,
-        since: Option<i64>,
-    ) -> Session {
-        Session {
-            agent_status: status,
-            agent_status_since: since,
-            ..session(name)
         }
     }
 
     #[test]
-    fn agent_sort_puts_attention_before_waiting_before_working_before_none() {
-        let mut sessions = vec![
-            session_with_agent_status("idle", None, None),
-            session_with_agent_status("working", Some(AgentStatus::Working), Some(1)),
-            session_with_agent_status("attention", Some(AgentStatus::Attention), Some(1)),
-            session_with_agent_status("waiting", Some(AgentStatus::Waiting), Some(1)),
-        ];
-
-        sort_sessions_by_agent_status(&mut sessions);
-
-        let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["attention", "waiting", "working", "idle"]);
-    }
-
-    #[test]
-    fn agent_sort_breaks_ties_by_oldest_timestamp_first() {
-        let mut sessions = vec![
-            session_with_agent_status("just-now", Some(AgentStatus::Waiting), Some(500)),
-            session_with_agent_status("neglected", Some(AgentStatus::Waiting), Some(100)),
-        ];
-
-        sort_sessions_by_agent_status(&mut sessions);
-
-        let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["neglected", "just-now"]);
-    }
-
-    #[test]
-    fn agent_sort_is_stable_for_sessions_with_no_agent() {
-        let mut sessions = vec![
-            session_with_agent_status("zeta", None, None),
-            session_with_agent_status("alpha", None, None),
-        ];
-
-        sort_sessions_by_agent_status(&mut sessions);
-
-        let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["zeta", "alpha"]);
-    }
-
-    #[test]
-    fn selects_current_session_when_present() {
+    fn selects_current_pane_when_present() {
         let app = App::new(
             vec![session("dev"), session("logs"), session("notes")],
-            Some("logs".to_string()),
+            Some("%logs".to_string()),
         );
 
         assert_eq!(app.selected_index, 1);
     }
 
     #[test]
-    fn clamps_navigation_at_grid_edges() {
+    fn horizontal_navigation_wraps_at_list_edges() {
         let mut app = App::new(vec![session("one"), session("two"), session("three")], None);
 
         app.move_left();
+        assert_eq!(app.selected_index, 2);
+
+        app.move_right();
         assert_eq!(app.selected_index, 0);
 
         app.move_right();
         app.move_right();
-        app.move_right();
         assert_eq!(app.selected_index, 2);
+    }
+
+    #[test]
+    fn vertical_navigation_still_clamps_at_grid_edges() {
+        let mut app = App::new(vec![session("one"), session("two"), session("three")], None);
+        app.selected_index = 2;
 
         app.move_down(2);
         assert_eq!(app.selected_index, 2);
@@ -372,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_selected_session_by_name_after_refresh() {
+    fn preserves_selected_pane_by_id_after_refresh() {
         let mut app = App::new(
             vec![session("dev"), session("logs"), session("notes")],
             None,
@@ -388,7 +279,7 @@ mod tests {
     fn preserves_preview_for_matching_session_after_refresh() {
         let mut app = App::new(
             vec![session("dev"), session("logs")],
-            Some("dev".to_string()),
+            Some("%dev".to_string()),
         );
         app.sessions[0].preview = vec!["snapshot".to_string()];
         app.sessions[0].preview_error = None;
@@ -402,7 +293,7 @@ mod tests {
 
         app.replace_sessions_preserving_preview_for(
             vec![refreshed_dev, refreshed_logs],
-            Some("$dev"),
+            Some("%dev"),
         );
 
         assert_eq!(app.sessions[0].preview, vec!["snapshot".to_string()]);

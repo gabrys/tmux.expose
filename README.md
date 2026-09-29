@@ -1,7 +1,7 @@
 <div align="center">
   <h1>tmux.expose</h1>
 
-  <p><strong>Mission Control-style tmux session switching from a fast terminal UI.</strong></p>
+  <p><strong>Mission Control-style tmux pane switching from a fast terminal UI.</strong></p>
 
   <p>
     <a href="https://github.com/cesarferreira/tmux.expose/actions/workflows/rust-tests.yml"><img alt="CI" src="https://github.com/cesarferreira/tmux.expose/actions/workflows/rust-tests.yml/badge.svg"></a>
@@ -28,9 +28,9 @@
 
 ## Why tmux.expose
 
-Switching tmux sessions with a list works, but it gives you names instead of context. **tmux.expose** shows every session as a live text thumbnail so you can jump to the right workspace visually.
+Switching tmux panes with a list works, but it gives you names instead of context. **tmux.expose** shows every pane in the current session as a live text thumbnail so you can jump to the right workspace visually.
 
-- **See before switching.** Browse sessions in a responsive grid with live pane previews.
+- **See before switching.** Browse panes in a responsive grid with live previews.
 - **Terminal-native.** A small Rust TUI that runs inside your terminal or a tmux popup.
 - **Color-aware previews.** tmux ANSI colors are preserved in thumbnails.
 - **Fast keyboard flow.** Move with arrows or `hjkl`, switch with `Enter`, leave with `q` or `Esc`.
@@ -99,14 +99,20 @@ tmux.expose in the bottom half of the screen.
 
 ### Card colors
 
-Each session card is highlighted based on its state. Recolor any of them to match your
+Each pane card is highlighted based on its state. Recolor any of them to match your
 theme:
 
 | Option | Highlights | Default |
 |---|---|---|
-| `@tmux-expose-selected-color` | The card under the cursor (title + border) | `yellow` |
-| `@tmux-expose-attached-color` | The session you are currently attached to (title + border) | `green` |
+| `@tmux-expose-selected-color` | The title of the card under the cursor | `yellow` |
+| `@tmux-expose-attached-color` | The active pane (title + border) | `green` |
 | `@tmux-expose-inactive-color` | Every other card (title only; the border stays dimmed) | `white` |
+
+The border keeps the color associated with the pane state and becomes brighter under
+the cursor. By default, the active pane goes from green to light green, panes in a window
+with a bell go from yellow to light yellow, and ordinary panes go from dark gray to light
+gray. Bell borders stay thick regardless of selection. Since tmux records bells per
+window, every pane from a window with a bell gets the bell border.
 
 Values accept a color name (`yellow`, `cyan`, …), a 256-color index (`colour208` or
 `208`), or a hex value (`#ff8700`). Omit an option to keep its default.
@@ -125,118 +131,6 @@ The same colors are also available as CLI flags when running the binary directly
 tmux-expose --selected-color '#bd93f9' --attached-color '#50fa7b' --inactive-color '#6272a4'
 ```
 
-### Agent status (Claude Code, and other agents)
-
-If you run coding agents inside tmux panes, tmux.expose can sort and badge sessions by
-whether an agent in them is waiting on you — instead of showing every session in the same
-flat, alphabetical order regardless of what's actually going on inside it.
-
-This works on **any agent that can run a shell command on state changes**. No config is
-required to make tmux.expose display it — the moment something writes the tmux pane
-options below, the grid picks it up on its next refresh:
-
-| tmux pane option | Meaning |
-|---|---|
-| `@agent_status` | `working`, `waiting`, or `attention` |
-| `@agent_status_since` | Unix timestamp of when that status started |
-
-`working` means the agent is actively running. `waiting` means its turn just ended and
-it's idle on you. `attention` means it's blocked on something stronger, like a permission
-prompt. A session's card takes the *worst* status across all of its panes (`attention` >
-`waiting` > `working`), so a multi-agent session never hides a stuck pane behind a busy
-one — and by default, sessions with a waiting or blocked agent sort to the top of the
-grid, oldest-waiting first.
-
-A single tracked pane gets a plain label on the card's bottom border:
-
-```
-⏳ awaiting reply
-```
-
-A session with more than one agent pane always spells out its *worst* status in words —
-that's the one setting the card's color and sort position, so it's the one thing you need
-to read at a glance — and shows the rest as compact counts:
-
-```
-‼ needs you · ⏳2 · ⚙1
-```
-
-(Words instead of a bare glyph+count everywhere is deliberate: emoji rendering varies by
-terminal font, so a symbol that fails to render is silent for the status that matters
-most.)
-
-The binary ships a one-shot helper for setting these, so nothing but `tmux-expose` itself
-needs to be on `PATH`:
-
-```bash
-tmux-expose agent-status working    # agent just started a turn
-tmux-expose agent-status waiting    # agent's turn ended, idle on you
-tmux-expose agent-status attention  # agent is blocked (e.g. needs a permission)
-tmux-expose agent-status clear      # agent/session is done — remove the marker
-```
-
-It reads `$TMUX_PANE` to know which pane to tag and no-ops outside tmux, so it's safe to
-wire into any hook without guarding it yourself.
-
-#### Claude Code setup
-
-Add this to `~/.claude/settings.json` (global — applies to every project) or a project's
-own `.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "tmux-expose agent-status working" }] }
-    ],
-    "Stop": [
-      { "hooks": [{ "type": "command", "command": "tmux-expose agent-status waiting" }] }
-    ],
-    "Notification": [
-      {
-        "matcher": "permission_prompt",
-        "hooks": [{ "type": "command", "command": "tmux-expose agent-status attention" }]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [{ "type": "command", "command": "tmux-expose agent-status clear" }]
-      }
-    ]
-  }
-}
-```
-
-If you already have a `hooks` block, merge these events into it rather than replacing it.
-Restart (or start a new) Claude Code session afterwards — hooks are read once at session
-start, so a session already running won't pick up an edit to `settings.json`.
-
-Other agents work the same way: run `tmux-expose agent-status <word>` from whatever hook,
-lifecycle script, or wrapper that agent exposes.
-
-#### Card colors and sort order
-
-Sensible defaults ship with the binary, so none of this is required — only set it to
-match your theme or to opt out of the sort:
-
-| Option | Highlights | Default |
-|---|---|---|
-| `@tmux-expose-attention-color` | A session with a pane blocked on you | `#ff5555` |
-| `@tmux-expose-waiting-color` | A session where an agent's turn just ended | `#ffb86c` |
-| `@tmux-expose-working-color` | A session with an agent still running | `#8be9fd` |
-| `@tmux-expose-agent-sort` | Set to `off` to keep tmux's own session order instead | `on` |
-
-```tmux
-set -g @tmux-expose-attention-color '#ff5555'
-set -g @tmux-expose-waiting-color '#ffb86c'
-set -g @tmux-expose-working-color '#8be9fd'
-set -g @tmux-expose-agent-sort 'on'
-```
-
-Also available as CLI flags: `--attention-color`, `--waiting-color`, `--working-color`,
-`--no-agent-sort`.
-
 ### Vim navigation
 
 Set `@tmux-expose-vim-keys 'on'` (or run `tmux-expose --vim`) to switch the picker to modal
@@ -248,7 +142,7 @@ When enabled, the picker starts in **normal** mode:
 |---|---|
 | `h` `j` `k` `l` (or arrows) | Move the selection |
 | `/` | Enter search mode |
-| `Enter` | Switch to the selected session |
+| `Enter` | Switch to the selected pane |
 | `q` / `Esc` | Quit |
 
 Pressing `/` enters **search** mode, where typing fuzzy-filters as usual (so `h/j/k/l`
@@ -312,7 +206,7 @@ Or open it in a tmux popup:
 tmux display-popup -w 100% -h 100% -E "tmux-expose"
 ```
 
-By default, thumbnails are sized into a balanced grid that fits all sessions on screen. Override the layout when you want larger previews or a fixed grid:
+By default, thumbnails are sized into a balanced grid that fits all panes on screen. Override the layout when you want larger previews or a fixed grid:
 
 ```bash
 tmux-expose --thumbnail-width 48
@@ -336,12 +230,12 @@ tmux-expose --selected-color cyan --attached-color green --inactive-color white
 
 | Key | Action |
 |---|---|
-| `Type` | Filter sessions by fuzzy name |
+| `Type` | Filter panes by fuzzy name |
 | `Arrow keys` | Move selection |
-| `Mouse click` | Switch to clicked session |
+| `Mouse click` | Switch to clicked pane |
 | `Backspace` | Edit search query |
 | `Esc` while searching | Clear search |
-| `Enter` | Switch to selected session |
+| `Enter` | Switch to selected pane |
 | `Esc` / `Ctrl-C` | Quit without switching |
 
 Prefer vim keys? See [Vim navigation](#vim-navigation) for an opt-in `hjkl` mode.

@@ -5,29 +5,24 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthChar;
 
-use crate::model::{AgentStatus, App, Session};
+use crate::model::{App, Session};
 
 pub const MIN_CARD_WIDTH: u16 = 32;
 pub const MIN_CARD_HEIGHT: u16 = 10;
-const CARD_GAP: u16 = 2;
+const CARD_GAP: u16 = 0;
 const FOOTER_HEIGHT: u16 = 1;
 
-/// Colors used to highlight session cards by state.
+/// Colors used to highlight pane cards by state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CardColors {
     /// The currently selected card (title + border).
     pub selected: Color,
-    /// The session you are currently attached to (title + border).
+    /// The active pane (title + border).
     pub attached: Color,
     /// Every other card (title only; the border stays dimmed).
     pub inactive: Color,
-    /// A session with a pane blocked on you (e.g. a permission prompt).
-    pub attention: Color,
-    /// A session where an agent's turn just ended — it's idle on you.
-    pub waiting: Color,
-    /// A session with an agent still actively running.
-    pub working: Color,
 }
 
 impl Default for CardColors {
@@ -36,100 +31,8 @@ impl Default for CardColors {
             selected: Color::Yellow,
             attached: Color::Green,
             inactive: Color::White,
-            attention: Color::Rgb(255, 85, 85),
-            waiting: Color::Rgb(255, 184, 108),
-            working: Color::Rgb(139, 233, 253),
         }
     }
-}
-
-fn agent_status_color(status: AgentStatus, colors: CardColors) -> Color {
-    match status {
-        AgentStatus::Attention => colors.attention,
-        AgentStatus::Waiting => colors.waiting,
-        AgentStatus::Working => colors.working,
-    }
-}
-
-fn agent_status_icon(status: AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::Attention => "‼",
-        AgentStatus::Waiting => "⏳",
-        AgentStatus::Working => "⚙",
-    }
-}
-
-fn agent_status_word(status: AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::Attention => "needs you",
-        AgentStatus::Waiting => "awaiting reply",
-        AgentStatus::Working => "working",
-    }
-}
-
-fn agent_status_count(status: AgentStatus, counts: crate::model::AgentPaneCounts) -> u32 {
-    match status {
-        AgentStatus::Attention => counts.attention,
-        AgentStatus::Waiting => counts.waiting,
-        AgentStatus::Working => counts.working,
-    }
-}
-
-/// The bottom-border badge text for a session's agent status. A glyph alone
-/// (or a bare count like "⏳2") is a gamble — it depends on the terminal
-/// font rendering that character, and tells you nothing if it doesn't. So
-/// the status that actually matters — whichever one is worst, since that's
-/// what set the card's color and sort position — always gets spelled out
-/// in words. Other statuses present on other panes stay compact (e.g.
-/// "‼ needs you · ⏳2 · ⚙1") since they're supporting context, not the
-/// thing you need to read at a glance.
-fn agent_status_label(session: &Session) -> Option<String> {
-    let counts = session.agent_pane_counts;
-    let worst = session.agent_status?;
-    if counts.total() == 0 {
-        return None;
-    }
-
-    let worst_count = agent_status_count(worst, counts);
-    let worst_label = if worst_count > 1 {
-        format!(
-            "{}{} {}",
-            agent_status_icon(worst),
-            worst_count,
-            agent_status_word(worst)
-        )
-    } else {
-        format!("{} {}", agent_status_icon(worst), agent_status_word(worst))
-    };
-
-    if counts.total() == 1 {
-        return Some(worst_label);
-    }
-
-    let mut parts = vec![worst_label];
-    for status in [
-        AgentStatus::Attention,
-        AgentStatus::Waiting,
-        AgentStatus::Working,
-    ] {
-        if status == worst {
-            continue;
-        }
-        let count = agent_status_count(status, counts);
-        if count > 0 {
-            parts.push(format!("{}{}", agent_status_icon(status), count));
-        }
-    }
-    Some(parts.join(" · "))
-}
-
-fn agent_status_span(session: &Session, colors: CardColors) -> Option<Span<'static>> {
-    let label = agent_status_label(session)?;
-    let color = agent_status_color(session.agent_status?, colors);
-    Some(Span::styled(
-        format!(" {label} "),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,10 +68,10 @@ pub fn render(
         render_centered_message(
             frame,
             chunks[0],
-            "No tmux sessions found.\nPress q or Esc to quit.",
+            "No tmux panes found.\nPress q or Esc to quit.",
         );
     } else if app.visible_session_count() == 0 {
-        render_centered_message(frame, chunks[0], "No matching sessions");
+        render_centered_message(frame, chunks[0], "No matching panes");
     } else {
         render_grid(
             frame,
@@ -201,8 +104,7 @@ pub fn render_grid(
 
     for (index, card_area) in grid.cards.iter().enumerate() {
         if let Some(session) = sessions.get(index) {
-            let current_attached = session.attached
-                && app.current_session_name.as_deref() == Some(session.name.as_str());
+            let current_attached = app.current_pane_id.as_deref() == Some(session.id.as_str());
             render_card(
                 frame,
                 session,
@@ -227,38 +129,24 @@ pub fn render_card(
         " {} ",
         truncate(&session.name, area.width.saturating_sub(12) as usize)
     );
-    let mut bottom_spans = vec![session_status_span(session.attached)];
-    if let Some(badge) = agent_status_span(session, colors) {
-        bottom_spans.push(badge);
-    }
+    let bottom_spans = vec![session_status_span(session.attached)];
     let block = Block::default()
         .title(Span::styled(
             title,
             card_title_style(selected, current_attached, colors),
         ))
-        .title_bottom(Line::from(bottom_spans))
+        .title_bottom(Line::from(bottom_spans).right_aligned())
         .borders(Borders::ALL)
-        .border_type(if selected {
-            BorderType::Double
-        } else {
-            BorderType::Plain
-        })
+        .border_type(card_border_type(session.bell))
         .border_style(card_border_style(
             selected,
             current_attached,
-            session.agent_status,
+            session.bell,
             colors,
         ));
 
-    let preview_height = area.height.saturating_sub(5) as usize;
+    let preview_height = area.height.saturating_sub(2) as usize;
     let mut lines = Vec::new();
-    let window = session.current_window.as_deref().unwrap_or("unknown");
-    lines.push(Line::from(vec![Span::styled(
-        format!("{} · {} windows", window, session.window_count),
-        Style::default().fg(Color::Cyan),
-    )]));
-    lines.push(Line::from(""));
-
     if session.preview_error.is_some() {
         lines.push(Line::from(Span::styled(
             "Preview unavailable",
@@ -308,32 +196,84 @@ fn card_title_style(selected: bool, current_attached: bool, colors: CardColors) 
 fn card_border_style(
     selected: bool,
     current_attached: bool,
-    agent_status: Option<AgentStatus>,
+    bell: bool,
     colors: CardColors,
 ) -> Style {
-    if selected {
-        Style::default()
-            .fg(colors.selected)
-            .add_modifier(Modifier::BOLD)
-    } else if current_attached {
-        Style::default().fg(colors.attached)
-    } else if let Some(status) = agent_status {
-        Style::default().fg(agent_status_color(status, colors))
+    let base_color = if current_attached {
+        colors.attached
+    } else if bell {
+        Color::Yellow
     } else {
-        Style::default().fg(Color::DarkGray)
+        Color::DarkGray
+    };
+    let color = if selected {
+        brighten_color(base_color)
+    } else {
+        base_color
+    };
+    let style = Style::default().fg(color);
+
+    if selected || bell {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn brighten_color(color: Color) -> Color {
+    match color {
+        Color::Reset | Color::Black => Color::DarkGray,
+        Color::Red => Color::LightRed,
+        Color::Green => Color::LightGreen,
+        Color::Yellow => Color::LightYellow,
+        Color::Blue => Color::LightBlue,
+        Color::Magenta => Color::LightMagenta,
+        Color::Cyan => Color::LightCyan,
+        Color::DarkGray => Color::Gray,
+        Color::Gray => Color::White,
+        Color::LightRed
+        | Color::LightGreen
+        | Color::LightYellow
+        | Color::LightBlue
+        | Color::LightMagenta
+        | Color::LightCyan
+        | Color::White => Color::White,
+        Color::Rgb(red, green, blue) => Color::Rgb(
+            red + (u8::MAX - red) / 2,
+            green + (u8::MAX - green) / 2,
+            blue + (u8::MAX - blue) / 2,
+        ),
+        Color::Indexed(index) if index < 8 => Color::Indexed(index + 8),
+        Color::Indexed(index) if index < 16 => Color::White,
+        Color::Indexed(index) if index < 232 => {
+            let cube = index - 16;
+            let red = (cube / 36 + 1).min(5);
+            let green = ((cube % 36) / 6 + 1).min(5);
+            let blue = (cube % 6 + 1).min(5);
+            Color::Indexed(16 + red * 36 + green * 6 + blue)
+        }
+        Color::Indexed(index) => Color::Indexed(index.saturating_add(6)),
+    }
+}
+
+fn card_border_type(bell: bool) -> BorderType {
+    if bell {
+        BorderType::Thick
+    } else {
+        BorderType::Plain
     }
 }
 
 fn session_status_span(attached: bool) -> Span<'static> {
     if attached {
         Span::styled(
-            " attached ",
+            " active ",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled(" detached ", Style::default().fg(Color::DarkGray))
+        Span::styled(" inactive ", Style::default().fg(Color::DarkGray))
     }
 }
 
@@ -535,8 +475,14 @@ fn truncate(value: &str, max_width: usize) -> String {
     }
 
     let mut output = String::new();
-    for ch in value.chars().take(max_width) {
+    let mut visible_width = 0;
+    for ch in value.chars().filter(|ch| !ch.is_control()) {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if visible_width + width > max_width {
+            break;
+        }
         output.push(ch);
+        visible_width += width;
     }
     output
 }
@@ -551,24 +497,39 @@ fn truncate_ansi(value: &str, max_width: usize) -> String {
     let mut chars = value.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
-            output.push(ch);
-            output.push(chars.next().unwrap());
-            for next in chars.by_ref() {
-                output.push(next);
-                if ('@'..='~').contains(&next) {
-                    break;
+        if ch == '\u{1b}' {
+            match chars.next() {
+                Some('[') => {
+                    let mut sequence = String::new();
+                    for next in chars.by_ref() {
+                        sequence.push(next);
+                        if ('@'..='~').contains(&next) {
+                            if next == 'm' {
+                                output.push('\u{1b}');
+                                output.push('[');
+                                output.push_str(&sequence);
+                            }
+                            break;
+                        }
+                    }
                 }
+                Some(']') => skip_osc(&mut chars),
+                Some('P' | 'X' | '^' | '_') => skip_until_st(&mut chars),
+                Some(_) | None => {}
             }
             continue;
         }
 
-        if visible_width == max_width {
-            break;
+        if ch.is_control() {
+            continue;
         }
 
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if visible_width + width > max_width {
+            break;
+        }
         output.push(ch);
-        visible_width += 1;
+        visible_width += width;
     }
 
     output
@@ -581,32 +542,59 @@ fn ansi_to_line(value: &str) -> Line<'static> {
     let mut chars = value.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next();
-            let mut sequence = String::new();
-            let mut is_sgr = false;
-            for next in chars.by_ref() {
-                if next == 'm' {
-                    is_sgr = true;
-                    break;
-                }
-                if ('@'..='~').contains(&next) {
-                    break;
-                }
-                sequence.push(next);
-            }
+        if ch == '\u{1b}' {
+            match chars.next() {
+                Some('[') => {
+                    let mut sequence = String::new();
+                    let mut is_sgr = false;
+                    for next in chars.by_ref() {
+                        if next == 'm' {
+                            is_sgr = true;
+                            break;
+                        }
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                        sequence.push(next);
+                    }
 
-            if is_sgr {
-                flush_span(&mut spans, &mut buffer, style);
-                apply_sgr(&sequence, &mut style);
+                    if is_sgr {
+                        flush_span(&mut spans, &mut buffer, style);
+                        apply_sgr(&sequence, &mut style);
+                    }
+                }
+                Some(']') => skip_osc(&mut chars),
+                Some('P' | 'X' | '^' | '_') => skip_until_st(&mut chars),
+                Some(_) | None => {}
             }
-        } else {
+        } else if !ch.is_control() {
             buffer.push(ch);
         }
     }
 
     flush_span(&mut spans, &mut buffer, style);
     Line::from(spans)
+}
+
+fn skip_osc(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(ch) = chars.next() {
+        if ch == '\u{7}' {
+            break;
+        }
+        if ch == '\u{1b}' && chars.peek() == Some(&'\\') {
+            chars.next();
+            break;
+        }
+    }
+}
+
+fn skip_until_st(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'\\') {
+            chars.next();
+            break;
+        }
+    }
 }
 
 fn flush_span(spans: &mut Vec<Span<'static>>, buffer: &mut String, style: Style) {
@@ -714,9 +702,11 @@ mod tests {
         assert_eq!(grid.columns, 4);
         assert_eq!(grid.rows, 2);
         assert_eq!(grid.cards.len(), 8);
-        assert_eq!(grid.cards[0].width, 24);
-        assert_eq!(grid.cards[0].height, 14);
+        assert_eq!(grid.cards[0].width, 25);
+        assert_eq!(grid.cards[0].height, 15);
+        assert_eq!(grid.cards[1].x, grid.cards[0].x + grid.cards[0].width);
         assert_eq!(grid.cards[3].x + grid.cards[3].width, 100);
+        assert_eq!(grid.cards[4].y, grid.cards[0].y + grid.cards[0].height);
     }
 
     #[test]
@@ -770,8 +760,8 @@ mod tests {
     fn custom_min_card_width_makes_automatic_cards_larger() {
         let grid = calculate_grid(Rect::new(0, 0, 100, 30), 6, Some(50), None);
 
-        assert_eq!(grid.columns, 1);
-        assert_eq!(grid.cards[0].width, 100);
+        assert_eq!(grid.columns, 2);
+        assert_eq!(grid.cards[0].width, 50);
     }
 
     #[test]
@@ -783,21 +773,44 @@ mod tests {
     }
 
     #[test]
-    fn attached_status_is_highlighted() {
+    fn active_status_is_highlighted() {
         let span = session_status_span(true);
 
-        assert_eq!(span.content, " attached ");
+        assert_eq!(span.content, " active ");
         assert_eq!(span.style.fg, Some(Color::Green));
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn detached_status_stays_muted() {
+    fn inactive_status_stays_muted() {
         let span = session_status_span(false);
 
-        assert_eq!(span.content, " detached ");
+        assert_eq!(span.content, " inactive ");
         assert_eq!(span.style.fg, Some(Color::DarkGray));
         assert!(!span.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn bell_uses_a_thick_yellow_border() {
+        let style = card_border_style(false, false, true, CardColors::default());
+
+        assert_eq!(card_border_type(true), BorderType::Thick);
+        assert_eq!(style.fg, Some(Color::Yellow));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn selected_bell_uses_a_thick_light_yellow_border() {
+        let style = card_border_style(true, false, true, CardColors::default());
+
+        assert_eq!(card_border_type(true), BorderType::Thick);
+        assert_eq!(style.fg, Some(Color::LightYellow));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn selection_uses_a_single_border() {
+        assert_eq!(card_border_type(false), BorderType::Plain);
     }
 
     #[test]
@@ -826,17 +839,34 @@ mod tests {
 
     #[test]
     fn current_attached_session_border_is_green_when_not_selected() {
-        let style = card_border_style(false, true, None, CardColors::default());
+        let style = card_border_style(false, true, false, CardColors::default());
 
         assert_eq!(style.fg, Some(Color::Green));
         assert!(!style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn selected_session_border_stays_yellow_and_bold() {
-        let style = card_border_style(true, true, None, CardColors::default());
+    fn selected_active_pane_border_is_light_green() {
+        let style = card_border_style(true, true, false, CardColors::default());
 
-        assert_eq!(style.fg, Some(Color::Yellow));
+        assert_eq!(style.fg, Some(Color::LightGreen));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn selected_active_pane_with_bell_is_thick_and_light_green() {
+        let style = card_border_style(true, true, true, CardColors::default());
+
+        assert_eq!(card_border_type(true), BorderType::Thick);
+        assert_eq!(style.fg, Some(Color::LightGreen));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn selected_inactive_pane_border_is_gray() {
+        let style = card_border_style(true, false, false, CardColors::default());
+
+        assert_eq!(style.fg, Some(Color::Gray));
         assert!(style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -846,9 +876,6 @@ mod tests {
             selected: Color::Magenta,
             attached: Color::Blue,
             inactive: Color::Cyan,
-            attention: Color::Red,
-            waiting: Color::LightYellow,
-            working: Color::LightCyan,
         };
 
         assert_eq!(
@@ -856,123 +883,33 @@ mod tests {
             Some(Color::Magenta)
         );
         assert_eq!(
-            card_border_style(true, false, None, colors).fg,
-            Some(Color::Magenta)
+            card_border_style(true, false, false, colors).fg,
+            Some(Color::Gray)
         );
         assert_eq!(card_title_style(false, true, colors).fg, Some(Color::Blue));
         assert_eq!(
-            card_border_style(false, true, None, colors).fg,
+            card_border_style(false, true, false, colors).fg,
             Some(Color::Blue)
         );
         assert_eq!(card_title_style(false, false, colors).fg, Some(Color::Cyan));
-        // Unselected, unattached, no-agent border stays dimmed regardless of
-        // the configured color.
+        // Unselected, inactive borders stay dimmed regardless of the configured color.
         assert_eq!(
-            card_border_style(false, false, None, colors).fg,
+            card_border_style(false, false, false, colors).fg,
             Some(Color::DarkGray)
         );
     }
 
     #[test]
-    fn agent_status_colors_take_priority_over_dimmed_default_border() {
-        let colors = CardColors::default();
-
-        assert_eq!(
-            card_border_style(false, false, Some(AgentStatus::Attention), colors).fg,
-            Some(colors.attention)
-        );
-        assert_eq!(
-            card_border_style(false, false, Some(AgentStatus::Waiting), colors).fg,
-            Some(colors.waiting)
-        );
-        assert_eq!(
-            card_border_style(false, false, Some(AgentStatus::Working), colors).fg,
-            Some(colors.working)
-        );
-    }
-
-    #[test]
-    fn selection_and_attachment_still_outrank_agent_status_color() {
-        let colors = CardColors::default();
-
-        assert_eq!(
-            card_border_style(true, false, Some(AgentStatus::Attention), colors).fg,
-            Some(colors.selected)
-        );
-        assert_eq!(
-            card_border_style(false, true, Some(AgentStatus::Attention), colors).fg,
-            Some(colors.attached)
-        );
-    }
-
-    #[test]
-    fn single_pane_agent_status_renders_a_plain_label() {
-        let mut session = test_session("dev");
-        session.agent_status = Some(AgentStatus::Waiting);
-        session.agent_pane_counts = crate::model::AgentPaneCounts {
-            waiting: 1,
-            ..Default::default()
+    fn selection_brightens_custom_active_rgb_color() {
+        let colors = CardColors {
+            attached: Color::Rgb(80, 160, 40),
+            ..CardColors::default()
         };
 
         assert_eq!(
-            agent_status_label(&session),
-            Some("⏳ awaiting reply".to_string())
+            card_border_style(true, true, false, colors).fg,
+            Some(Color::Rgb(167, 207, 147))
         );
-    }
-
-    #[test]
-    fn multi_pane_agent_status_spells_out_the_worst_status_and_counts_the_rest() {
-        let mut session = test_session("dev");
-        session.agent_status = Some(AgentStatus::Attention);
-        session.agent_pane_counts = crate::model::AgentPaneCounts {
-            working: 1,
-            waiting: 2,
-            attention: 1,
-        };
-
-        assert_eq!(
-            agent_status_label(&session),
-            Some("‼ needs you · ⏳2 · ⚙1".to_string())
-        );
-    }
-
-    #[test]
-    fn multi_pane_agent_status_shows_a_count_on_the_worst_status_too_when_it_has_more_than_one() {
-        let mut session = test_session("dev");
-        session.agent_status = Some(AgentStatus::Attention);
-        session.agent_pane_counts = crate::model::AgentPaneCounts {
-            working: 0,
-            waiting: 1,
-            attention: 2,
-        };
-
-        assert_eq!(
-            agent_status_label(&session),
-            Some("‼2 needs you · ⏳1".to_string())
-        );
-    }
-
-    #[test]
-    fn no_agent_pane_status_renders_no_label() {
-        let session = test_session("dev");
-
-        assert_eq!(agent_status_label(&session), None);
-    }
-
-    fn test_session(name: &str) -> Session {
-        Session {
-            id: format!("${name}"),
-            name: name.to_string(),
-            attached: false,
-            window_count: 1,
-            current_window: None,
-            last_activity: None,
-            preview: Vec::new(),
-            preview_error: None,
-            agent_status: None,
-            agent_status_since: None,
-            agent_pane_counts: crate::model::AgentPaneCounts::default(),
-        }
     }
 
     #[test]
@@ -1081,5 +1018,24 @@ mod tests {
         let truncated = truncate_ansi("\u{1b}[31mred\u{1b}[0m plain", 5);
 
         assert_eq!(truncated, "\u{1b}[31mred\u{1b}[0m p");
+    }
+
+    #[test]
+    fn osc_hyperlinks_are_removed_before_truncation_and_rendering() {
+        let value = "opis \u{1b}]8;;https://github.com/example/pull/1\u{1b}\\PR #1\u{1b}]8;;\u{1b}\\ dalej";
+        let truncated = truncate_ansi(value, 12);
+
+        assert_eq!(truncated, "opis PR #1 d");
+        let line = ansi_to_line(&truncated);
+        let rendered: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(rendered, "opis PR #1 d");
+    }
+
+    #[test]
+    fn embedded_control_characters_are_not_rendered() {
+        let line = ansi_to_line("before\rafter\u{7}");
+        let rendered: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+
+        assert_eq!(rendered, "beforeafter");
     }
 }

@@ -1,11 +1,10 @@
 use std::{
     env, io,
-    process::Command,
     str::FromStr,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
     cursor::{Hide, Show},
@@ -15,14 +14,10 @@ use crossterm::{
 };
 use ratatui::style::Color;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
-use tmux_expose::{
-    input,
-    model::{self, AgentStatus, App},
-    tmux, ui,
-};
+use tmux_expose::{input, model::App, tmux, ui};
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Mission Control-style tmux session switcher")]
+#[command(version, about = "Mission Control-style tmux pane switcher")]
 struct Cli {
     #[arg(long, default_value_t = 500, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
     refresh_interval: u64,
@@ -42,23 +37,9 @@ struct Cli {
     #[arg(long, value_name = "COLOR", value_parser = parse_color)]
     inactive_color: Option<Color>,
 
-    #[arg(long, value_name = "COLOR", value_parser = parse_color)]
-    attention_color: Option<Color>,
-
-    #[arg(long, value_name = "COLOR", value_parser = parse_color)]
-    waiting_color: Option<Color>,
-
-    #[arg(long, value_name = "COLOR", value_parser = parse_color)]
-    working_color: Option<Color>,
-
     /// Use modal vim navigation: hjkl to move, `/` to search, q/Esc to quit.
     #[arg(long)]
     vim: bool,
-
-    /// Keep tmux's own session order instead of sorting sessions with a
-    /// waiting agent to the top.
-    #[arg(long)]
-    no_agent_sort: bool,
 }
 
 fn parse_color(value: &str) -> Result<Color, String> {
@@ -106,83 +87,14 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// One-shot side-effecting command meant to be wired straight into an
-/// agent's own hook config (e.g. Claude Code's `settings.json`) as
-/// `tmux-expose agent-status <working|waiting|attention|clear>`. Deliberately
-/// not a clap subcommand: it never launches the TUI, so hook configs only
-/// need to know one binary name, and it can't collide with the picker's own
-/// flags.
-///
-/// Records status on the calling pane (via `$TMUX_PANE`, which tmux injects
-/// into every pane's shell — and which a hook subprocess inherits, since
-/// it's a child of that same shell) so tmux-expose can read it back later.
-fn run_agent_status(status: &str) -> Result<()> {
-    validate_agent_status_word(status)?;
-
-    let Ok(pane) = env::var("TMUX_PANE") else {
-        return Ok(()); // Not inside tmux — nothing to record.
-    };
-    if pane.is_empty() {
-        return Ok(());
-    }
-
-    if status == "clear" {
-        clear_pane_option(&pane, "@agent_status");
-        clear_pane_option(&pane, "@agent_status_since");
-    } else {
-        set_pane_option(&pane, "@agent_status", status);
-        let since = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs().to_string())
-            .unwrap_or_default();
-        set_pane_option(&pane, "@agent_status_since", &since);
-    }
-
-    Ok(())
-}
-
-fn validate_agent_status_word(status: &str) -> Result<()> {
-    if status == "clear" || AgentStatus::parse(status).is_some() {
-        return Ok(());
-    }
-    bail!("unknown agent status {status:?}; expected working, waiting, attention, or clear");
-}
-
-// A hook should never fail loudly just because tmux hiccuped — swallow the
-// result rather than propagating it.
-fn set_pane_option(pane: &str, option: &str, value: &str) {
-    let _ = Command::new("tmux")
-        .args(["set-option", "-p", "-t", pane, option, value])
-        .status();
-}
-
-fn clear_pane_option(pane: &str, option: &str) {
-    let _ = Command::new("tmux")
-        .args(["set-option", "-p", "-t", pane, "-u", option])
-        .status();
-}
-
 fn main() -> Result<()> {
-    let mut raw_args = env::args();
-    raw_args.next(); // program name
-    if raw_args.next().as_deref() == Some("agent-status") {
-        return run_agent_status(&raw_args.next().unwrap_or_default());
-    }
-
     let cli = Cli::parse();
 
-    let current_session_name = tmux::current_session_name().unwrap_or(None);
-    let current_session_id = tmux::current_session_id().unwrap_or(None);
-    let agent_sort = !cli.no_agent_sort;
-    let mut app = match tmux::list_sessions() {
-        Ok(mut sessions) => {
-            if agent_sort {
-                model::sort_sessions_by_agent_status(&mut sessions);
-            }
-            App::new(sessions, current_session_name)
-        }
+    let current_pane_id = tmux::current_pane_id().unwrap_or(None);
+    let mut app = match tmux::list_panes() {
+        Ok(panes) => App::new(panes, current_pane_id.clone()),
         Err(error) => {
-            let mut app = App::new(Vec::new(), current_session_name);
+            let mut app = App::new(Vec::new(), current_pane_id.clone());
             app.error = Some(format!("{error}\n\nPress q or Esc to quit."));
             app
         }
@@ -199,16 +111,6 @@ fn main() -> Result<()> {
     if let Some(color) = cli.inactive_color {
         colors.inactive = color;
     }
-    if let Some(color) = cli.attention_color {
-        colors.attention = color;
-    }
-    if let Some(color) = cli.waiting_color {
-        colors.waiting = color;
-    }
-    if let Some(color) = cli.working_color {
-        colors.working = color;
-    }
-
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("failed to create terminal")?;
@@ -218,8 +120,14 @@ fn main() -> Result<()> {
         .ok()
         .and_then(|key| input::ToggleKey::from_tmux_key(&key));
     let mut last_refresh = Instant::now();
+    let mut force_full_redraw = false;
 
     loop {
+        if force_full_redraw {
+            invalidate_previous_frame(&mut terminal);
+            force_full_redraw = false;
+        }
+
         let forced_columns = cli.columns.map(usize::from);
         terminal
             .draw(|frame| ui::render(frame, &app, colors, cli.thumbnail_width, forced_columns))?;
@@ -229,14 +137,14 @@ fn main() -> Result<()> {
         }
 
         if app.should_switch {
-            if let Some(session) = app.selected_session() {
-                let selected_name = session.name.clone();
-                let selected_target = session.id.clone();
-                if app.current_session_name.as_deref() == Some(selected_name.as_str()) {
+            if let Some(pane) = app.selected_session() {
+                let selected_pane = pane.id.clone();
+                let selected_window = pane.window_id.clone();
+                if app.current_pane_id.as_deref() == Some(selected_pane.as_str()) {
                     break;
                 }
 
-                match tmux::switch_client(&selected_target) {
+                match tmux::select_pane(&selected_window, &selected_pane) {
                     Ok(()) => break,
                     Err(error) => {
                         app.error = Some(format!("{error}\n\nPress q or Esc to quit."));
@@ -253,6 +161,7 @@ fn main() -> Result<()> {
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
+                    let previously_selected = app.selected_session().map(|pane| pane.id.clone());
                     let columns = current_columns(
                         &terminal,
                         app.visible_session_count(),
@@ -260,6 +169,8 @@ fn main() -> Result<()> {
                         forced_columns,
                     )?;
                     input::handle_key_with_toggle(&mut app, key, columns, toggle_key);
+                    let currently_selected = app.selected_session().map(|pane| pane.id.clone());
+                    force_full_redraw = previously_selected != currently_selected;
                 }
                 Event::Mouse(mouse) => {
                     let grid_area = current_grid_area(&terminal)?;
@@ -277,14 +188,11 @@ fn main() -> Result<()> {
         }
 
         if last_refresh.elapsed() >= refresh_interval {
-            match tmux::list_sessions_skipping_preview_for(current_session_id.as_deref()) {
-                Ok(mut sessions) => {
-                    if agent_sort {
-                        model::sort_sessions_by_agent_status(&mut sessions);
-                    }
+            match tmux::list_panes_skipping_preview_for(current_pane_id.as_deref()) {
+                Ok(panes) => {
                     app.replace_sessions_preserving_preview_for(
-                        sessions,
-                        current_session_id.as_deref(),
+                        panes,
+                        current_pane_id.as_deref(),
                     );
                     app.error = None;
                 }
@@ -313,6 +221,17 @@ fn current_columns(
 fn current_grid_area(terminal: &Terminal<CrosstermBackend<io::Stdout>>) -> Result<Rect> {
     let area = terminal.size().context("failed to read terminal size")?;
     Ok(Rect::new(0, 0, area.width, area.height.saturating_sub(1)))
+}
+
+/// Force Ratatui to emit every cell on the next draw without physically
+/// clearing the terminal first. This repairs a backend/display desync while
+/// avoiding the visible blank frame produced by `Terminal::clear()`.
+fn invalidate_previous_frame(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    terminal.swap_buffers();
+    for cell in &mut terminal.current_buffer_mut().content {
+        cell.set_symbol("\0");
+    }
+    terminal.swap_buffers();
 }
 
 #[cfg(test)]
@@ -419,62 +338,5 @@ mod tests {
         let cli = Cli::parse_from(["tmux-expose", "--vim"]);
 
         assert!(cli.vim);
-    }
-
-    #[test]
-    fn agent_status_colors_default_to_none() {
-        let cli = Cli::parse_from(["tmux-expose"]);
-
-        assert_eq!(cli.attention_color, None);
-        assert_eq!(cli.waiting_color, None);
-        assert_eq!(cli.working_color, None);
-    }
-
-    #[test]
-    fn parses_agent_status_colors() {
-        let cli = Cli::parse_from([
-            "tmux-expose",
-            "--attention-color",
-            "red",
-            "--waiting-color",
-            "colour208",
-            "--working-color",
-            "#8be9fd",
-        ]);
-
-        assert_eq!(cli.attention_color, Some(Color::Red));
-        assert_eq!(cli.waiting_color, Some(Color::Indexed(208)));
-        assert_eq!(cli.working_color, Some(Color::Rgb(139, 233, 253)));
-    }
-
-    #[test]
-    fn agent_sort_is_on_by_default() {
-        let cli = Cli::parse_from(["tmux-expose"]);
-
-        assert!(!cli.no_agent_sort);
-    }
-
-    #[test]
-    fn parses_no_agent_sort_flag() {
-        let cli = Cli::parse_from(["tmux-expose", "--no-agent-sort"]);
-
-        assert!(cli.no_agent_sort);
-    }
-
-    #[test]
-    fn accepts_known_agent_status_words() {
-        for word in ["working", "waiting", "attention", "clear"] {
-            assert!(
-                validate_agent_status_word(word).is_ok(),
-                "{word} should be valid"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_unknown_agent_status_words() {
-        assert!(validate_agent_status_word("").is_err());
-        assert!(validate_agent_status_word("done").is_err());
-        assert!(validate_agent_status_word("Waiting").is_err());
     }
 }

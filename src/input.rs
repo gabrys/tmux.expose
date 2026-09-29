@@ -183,18 +183,12 @@ fn push_filter_char(app: &mut App, ch: char) {
     app.push_search_char(ch);
 }
 
-fn move_left(app: &mut App, columns: usize) {
-    let columns = columns.max(1);
-    if !app.selected_index.is_multiple_of(columns) {
-        app.move_left();
-    }
+fn move_left(app: &mut App, _columns: usize) {
+    app.move_left();
 }
 
-fn move_right(app: &mut App, columns: usize) {
-    let columns = columns.max(1);
-    if app.selected_index % columns != columns - 1 {
-        app.move_right();
-    }
+fn move_right(app: &mut App, _columns: usize) {
+    app.move_right();
 }
 
 #[cfg(test)]
@@ -213,17 +207,13 @@ mod tests {
 
     fn session(name: &str) -> Session {
         Session {
-            id: format!("${name}"),
+            id: format!("%{name}"),
+            window_id: format!("@{name}"),
             name: name.to_string(),
             attached: false,
-            window_count: 1,
-            current_window: None,
-            last_activity: None,
+            bell: false,
             preview: Vec::new(),
             preview_error: None,
-            agent_status: None,
-            agent_status_since: None,
-            agent_pane_counts: crate::model::AgentPaneCounts::default(),
         }
     }
 
@@ -238,7 +228,7 @@ mod tests {
         assert_eq!(app.selected_index, 2);
 
         handle_key(&mut app, key(KeyCode::Left), 2);
-        assert_eq!(app.selected_index, 2);
+        assert_eq!(app.selected_index, 1);
     }
 
     #[test]
@@ -684,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_navigation_clamps_at_row_edges() {
+    fn horizontal_navigation_crosses_rows_and_wraps() {
         let mut app = App::new(
             vec![
                 session("one"),
@@ -697,9 +687,11 @@ mod tests {
         app.selected_index = 2;
 
         handle_key(&mut app, key(KeyCode::Right), 3);
-        assert_eq!(app.selected_index, 2);
+        assert_eq!(app.selected_index, 3);
 
-        app.selected_index = 3;
+        handle_key(&mut app, key(KeyCode::Right), 3);
+        assert_eq!(app.selected_index, 0);
+
         handle_key(&mut app, key(KeyCode::Left), 3);
         assert_eq!(app.selected_index, 3);
     }

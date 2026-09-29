@@ -2,7 +2,7 @@
 name = "tmux-expose"
 version = "0.7.0"
 edition = "2024"
-description = "Mission Control-style tmux session switcher with live terminal previews"
+description = "Mission Control-style tmux window switcher with live terminal previews"
 license = "MIT"
 repository = "https://github.com/cesarferreira/tmux.expose"
 homepage = "https://github.com/cesarferreira/tmux.expose"
@@ -15,3 +15,4 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 ratatui = "0.28"
+unicode-width = "0.1"

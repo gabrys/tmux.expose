@@ -12,10 +12,6 @@ border_style="$(tmux show-option -gqv @tmux-expose-border-style)"
 selected_color="$(tmux show-option -gqv @tmux-expose-selected-color)"
 attached_color="$(tmux show-option -gqv @tmux-expose-attached-color)"
 inactive_color="$(tmux show-option -gqv @tmux-expose-inactive-color)"
-attention_color="$(tmux show-option -gqv @tmux-expose-attention-color)"
-waiting_color="$(tmux show-option -gqv @tmux-expose-waiting-color)"
-working_color="$(tmux show-option -gqv @tmux-expose-working-color)"
-agent_sort="$(tmux show-option -gqv @tmux-expose-agent-sort)"
 vim_keys="$(tmux show-option -gqv @tmux-expose-vim-keys)"
 command="$(tmux show-option -gqv @tmux-expose-command)"
 
@@ -46,25 +42,8 @@ if [[ -n "${inactive_color}" ]]; then
   command="${command} --inactive-color $(printf '%q' "${inactive_color}")"
 fi
 
-if [[ -n "${attention_color}" ]]; then
-  command="${command} --attention-color $(printf '%q' "${attention_color}")"
-fi
-
-if [[ -n "${waiting_color}" ]]; then
-  command="${command} --waiting-color $(printf '%q' "${waiting_color}")"
-fi
-
-if [[ -n "${working_color}" ]]; then
-  command="${command} --working-color $(printf '%q' "${working_color}")"
-fi
-
 case "$(printf '%s' "${vim_keys}" | tr '[:upper:]' '[:lower:]')" in
   on|true|1|yes) command="${command} --vim" ;;
-esac
-
-# Agent-status sorting defaults on; @tmux-expose-agent-sort off/false/0/no opts out.
-case "$(printf '%s' "${agent_sort}" | tr '[:upper:]' '[:lower:]')" in
-  off|false|0|no) command="${command} --no-agent-sort" ;;
 esac
 
 position_args=()
