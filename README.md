@@ -84,7 +84,6 @@ set -g @tmux-expose-border-style 'fg=colour245'
 set -g @tmux-expose-selected-color 'yellow'
 set -g @tmux-expose-attached-color 'green'
 set -g @tmux-expose-inactive-color 'white'
-set -g @tmux-expose-vim-keys 'on'
 set -g @tmux-expose-command 'tmux-expose --columns 2'
 
 set -g @plugin 'cesarferreira/tmux.expose'
@@ -130,32 +129,6 @@ The same colors are also available as CLI flags when running the binary directly
 ```bash
 tmux-expose --selected-color '#bd93f9' --attached-color '#50fa7b' --inactive-color '#6272a4'
 ```
-
-### Vim navigation
-
-Set `@tmux-expose-vim-keys 'on'` (or run `tmux-expose --vim`) to switch the picker to modal
-vim keys. It is off by default, leaving the standard type-to-filter behavior unchanged.
-
-When enabled, the picker starts in **normal** mode:
-
-| Key | Action |
-|---|---|
-| `h` `j` `k` `l` (or arrows) | Move the selection |
-| `/` | Enter search mode |
-| `Enter` | Switch to the selected pane |
-| `q` / `Esc` | Quit |
-
-Pressing `/` enters **search** mode, where typing fuzzy-filters as usual (so `h/j/k/l`
-become text again). `Esc` commits whatever you typed as a filter and drops back into
-**normal** mode — Telescope-style — so `hjkl` browses the filtered results instead of
-typing into them; `Enter` switches straight from either mode. Press `/` again to start a
-fresh search, or `Esc` a second time (from normal mode, with a filter still applied) to
-clear it. Escaping an empty query cancels instead of applying an empty filter.
-
-> **Note:** `@tmux-expose-vim-keys` works by appending `--vim` to `@tmux-expose-command`
-> (which defaults to `tmux-expose`). If you point `@tmux-expose-command` at a custom wrapper
-> script, make sure it accepts `--vim` — or set the flag there yourself instead. The
-> `@tmux-expose-*-color` options behave the same way.
 
 ## Custom Example
 
@@ -230,15 +203,11 @@ tmux-expose --selected-color cyan --attached-color green --inactive-color white
 
 | Key | Action |
 |---|---|
-| `Type` | Filter panes by fuzzy name |
 | `Arrow keys` | Move selection |
+| `Alt-1` … `Alt-9` | Switch directly to the first … ninth pane |
 | `Mouse click` | Switch to clicked pane |
-| `Backspace` | Edit search query |
-| `Esc` while searching | Clear search |
 | `Enter` | Switch to selected pane |
 | `Esc` / `Ctrl-C` | Quit without switching |
-
-Prefer vim keys? See [Vim navigation](#vim-navigation) for an opt-in `hjkl` mode.
 
 <a id="tmux-plugin"></a>
 

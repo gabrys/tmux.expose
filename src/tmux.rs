@@ -208,9 +208,8 @@ mod tests {
 
     #[test]
     fn parses_pane_names_containing_colons() {
-        let panes = parse_panes(
-            "%3\\037@3\\037dev:api\\037fallback\\0370\\0371\\0370\\0371\\0370\n",
-        );
+        let panes =
+            parse_panes("%3\\037@3\\037dev:api\\037fallback\\0370\\0371\\0370\\0371\\0370\n");
 
         assert_eq!(panes[0].id, "%3");
         assert_eq!(panes[0].name, "dev:api");
@@ -218,9 +217,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_window_name_when_status_format_is_empty() {
-        let panes = parse_panes(
-            "%4\\037@4\\037   \\037shell\\0370\\0371\\0370\\0371\\0370\n",
-        );
+        let panes = parse_panes("%4\\037@4\\037   \\037shell\\0370\\0371\\0370\\0371\\0370\n");
 
         assert_eq!(panes[0].name, "shell");
     }
@@ -239,9 +236,7 @@ mod tests {
 
     #[test]
     fn active_pane_in_an_inactive_window_is_not_attached() {
-        let panes = parse_panes(
-            "%4\\037@4\\037shell\\037fallback\\0370\\0371\\0370\\0371\\0370\n",
-        );
+        let panes = parse_panes("%4\\037@4\\037shell\\037fallback\\0370\\0371\\0370\\0371\\0370\n");
 
         assert!(!panes[0].attached);
     }

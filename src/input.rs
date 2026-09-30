@@ -54,60 +54,27 @@ pub fn handle_key_with_toggle(
         return;
     }
 
-    if toggle_key.is_some_and(|toggle_key| toggle_key.matches(key)) {
-        // A typeable toggle key — e.g. `e`/`E` from a `prefix + e` binding — must
-        // stay usable as filter input while searching, so only close on it when a
-        // query is not being entered. A modified toggle (e.g. M-e) can't be typed
-        // into the filter, so it still closes from anywhere.
-        let typeable_during_search = app.is_searching() && is_typeable_filter_key(key);
-        if !typeable_during_search {
-            app.should_quit = true;
-            return;
+    if let (KeyCode::Char(digit @ '1'..='9'), KeyModifiers::ALT) = (key.code, key.modifiers) {
+        let index = digit as usize - '1' as usize;
+        if index < app.visible_session_count() {
+            app.selected_index = index;
+            app.should_switch = true;
         }
-    }
-
-    if app.is_searching() {
-        handle_search_key(app, key, columns);
         return;
     }
 
-    if app.vim_keys {
-        handle_vim_normal_key(app, key, columns);
+    if toggle_key.is_some_and(|toggle_key| toggle_key.matches(key)) {
+        app.should_quit = true;
         return;
     }
 
-    handle_default_key(app, key, columns);
-}
-
-/// Default mode: typing any character immediately fuzzy-filters the list.
-fn handle_default_key(app: &mut App, key: KeyEvent, columns: usize) {
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) => app.should_quit = true,
         (KeyCode::Enter, _) => app.should_switch = true,
-        (KeyCode::Left, _) => move_left(app, columns),
-        (KeyCode::Right, _) => move_right(app, columns),
+        (KeyCode::Left, _) => app.move_left(),
+        (KeyCode::Right, _) => app.move_right(),
         (KeyCode::Up, _) => app.move_up(columns),
         (KeyCode::Down, _) => app.move_down(columns),
-        (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => push_filter_char(app, ch),
-        _ => {}
-    }
-}
-
-/// Vim NORMAL mode: hjkl (and arrows) move the selection, `/` enters search.
-/// An applied-but-not-editing filter (see `App::stop_editing_search`) is
-/// still active here — Esc clears that filter before it falls back to
-/// quitting, so a filtered browse needs two Escs to close, same as `q`
-/// always does in one.
-fn handle_vim_normal_key(app: &mut App, key: KeyEvent, columns: usize) {
-    match (key.code, key.modifiers) {
-        (KeyCode::Esc, _) if app.search_text().is_some() => app.clear_search(),
-        (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => app.should_quit = true,
-        (KeyCode::Enter, _) => app.should_switch = true,
-        (KeyCode::Char('/'), KeyModifiers::NONE) => app.start_search(),
-        (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => move_left(app, columns),
-        (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => move_right(app, columns),
-        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => app.move_up(columns),
-        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => app.move_down(columns),
         _ => {}
     }
 }
@@ -146,60 +113,10 @@ fn contains(area: Rect, x: u16, y: u16) -> bool {
         && y < area.y.saturating_add(area.height)
 }
 
-/// Keys the search filter accepts as text input — matching the `Char` arm in
-/// `handle_search_key`. Uppercase keys arrive with `SHIFT`, so both lower- and
-/// uppercase configured toggle keys count as typeable.
-fn is_typeable_filter_key(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char(_))
-        && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
-}
-
-fn handle_search_key(app: &mut App, key: KeyEvent, columns: usize) {
-    match (key.code, key.modifiers) {
-        // Vim mode: Esc on an empty query cancels (nothing to keep); Esc on
-        // a typed query commits it as a filter and drops into NORMAL mode —
-        // hjkl then browses the filtered results instead of typing into it.
-        (KeyCode::Esc, _) if app.vim_keys && app.search_text().is_some_and(str::is_empty) => {
-            app.clear_search();
-        }
-        (KeyCode::Esc, _) if app.vim_keys => app.stop_editing_search(),
-        (KeyCode::Esc, _) if app.search_text().is_some_and(str::is_empty) => app.should_quit = true,
-        (KeyCode::Esc, _) => app.clear_search(),
-        (KeyCode::Enter, _) => app.should_switch = true,
-        (KeyCode::Backspace, _) => app.pop_search_char(),
-        (KeyCode::Left, _) => move_left(app, columns),
-        (KeyCode::Right, _) => move_right(app, columns),
-        (KeyCode::Up, _) => app.move_up(columns),
-        (KeyCode::Down, _) => app.move_down(columns),
-        (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => push_filter_char(app, ch),
-        _ => {}
-    }
-}
-
-fn push_filter_char(app: &mut App, ch: char) {
-    if !app.is_searching() {
-        app.start_search();
-    }
-    app.push_search_char(ch);
-}
-
-fn move_left(app: &mut App, _columns: usize) {
-    app.move_left();
-}
-
-fn move_right(app: &mut App, _columns: usize) {
-    app.move_right();
-}
-
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
-    use ratatui::layout::Rect;
-
     use super::*;
-    use crate::model::{App, Session};
+    use crate::model::Session;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -217,482 +134,116 @@ mod tests {
         }
     }
 
-    #[test]
-    fn arrow_keys_move_selection() {
-        let mut app = App::new(vec![session("one"), session("two"), session("three")], None);
-
-        handle_key(&mut app, key(KeyCode::Right), 2);
-        assert_eq!(app.selected_index, 1);
-
-        handle_key(&mut app, key(KeyCode::Down), 2);
-        assert_eq!(app.selected_index, 2);
-
-        handle_key(&mut app, key(KeyCode::Left), 2);
-        assert_eq!(app.selected_index, 1);
+    fn app(count: usize) -> App {
+        App::new(
+            (1..=count)
+                .map(|index| session(&index.to_string()))
+                .collect(),
+            None,
+        )
     }
 
     #[test]
-    fn hjkl_filter_instead_of_moving() {
-        let mut app = App::new(vec![session("one"), session("two"), session("three")], None);
-
-        handle_key(&mut app, key(KeyCode::Char('h')), 2);
-
-        assert_eq!(app.selected_index, 0);
-        assert_eq!(app.search_text(), Some("h"));
-    }
-
-    fn vim_app(names: &[&str]) -> App {
-        let mut app = App::new(names.iter().map(|name| session(name)).collect(), None);
-        app.vim_keys = true;
-        app
-    }
-
-    #[test]
-    fn vim_hjkl_move_selection_without_filtering() {
-        let mut app = vim_app(&["one", "two", "three", "four"]);
-
-        handle_key(&mut app, key(KeyCode::Char('l')), 2); // right
-        assert_eq!(app.selected_index, 1);
-
-        handle_key(&mut app, key(KeyCode::Char('j')), 2); // down
-        assert_eq!(app.selected_index, 3);
-
-        handle_key(&mut app, key(KeyCode::Char('h')), 2); // left
-        assert_eq!(app.selected_index, 2);
-
-        handle_key(&mut app, key(KeyCode::Char('k')), 2); // up
-        assert_eq!(app.selected_index, 0);
-
-        // hjkl must not leak into the search filter while navigating.
-        assert!(!app.is_searching());
-    }
-
-    #[test]
-    fn vim_arrows_still_move_selection() {
-        let mut app = vim_app(&["one", "two", "three"]);
-
-        handle_key(&mut app, key(KeyCode::Right), 2);
-        assert_eq!(app.selected_index, 1);
-
-        handle_key(&mut app, key(KeyCode::Down), 2);
-        assert_eq!(app.selected_index, 2);
-    }
-
-    #[test]
-    fn vim_slash_enters_search_mode() {
-        let mut app = vim_app(&["one", "two"]);
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-
-        assert!(app.is_searching());
-        assert_eq!(app.search_text(), Some(""));
-    }
-
-    #[test]
-    fn vim_typing_in_search_filters_including_hjkl() {
-        let mut app = vim_app(&["backend", "frontend", "hjkl-box"]);
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-        handle_key(&mut app, key(KeyCode::Char('h')), 1);
-
-        assert_eq!(app.search_text(), Some("h"));
-        assert_eq!(app.selected_session().unwrap().name, "hjkl-box");
-    }
-
-    #[test]
-    fn vim_esc_in_search_returns_to_normal_without_quitting() {
-        let mut app = vim_app(&["one", "two"]);
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-        handle_key(&mut app, key(KeyCode::Char('o')), 1);
-        handle_key(&mut app, key(KeyCode::Esc), 1);
-
-        assert!(!app.is_searching());
-        assert!(!app.should_quit);
-    }
-
-    #[test]
-    fn vim_esc_on_typed_query_keeps_it_as_a_filter() {
-        // The actual bug this exists to pin: Esc used to discard the query
-        // outright. It should commit it instead, Telescope-style, so hjkl
-        // can browse the filtered results afterward.
-        let mut app = vim_app(&["backend", "database", "notes"]);
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-        handle_key(&mut app, key(KeyCode::Char('d')), 1);
-        handle_key(&mut app, key(KeyCode::Esc), 1);
-
-        assert!(!app.is_searching());
-        assert_eq!(app.search_text(), Some("d"));
-        assert_eq!(app.visible_session_count(), 2); // backend, database (not notes)
-    }
-
-    #[test]
-    fn vim_hjkl_navigates_a_filter_committed_by_esc() {
-        let mut app = vim_app(&["backend", "database", "notes"]);
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-        handle_key(&mut app, key(KeyCode::Char('d')), 1);
-        handle_key(&mut app, key(KeyCode::Esc), 1);
-        assert_eq!(app.selected_session().unwrap().name, "backend");
-
-        // If Esc failed to leave text-entry, 'j' would filter instead of moving.
-        handle_key(&mut app, key(KeyCode::Char('j')), 1);
-
-        assert_eq!(app.search_text(), Some("d"));
-        assert_eq!(app.selected_session().unwrap().name, "database");
-    }
-
-    #[test]
-    fn vim_esc_on_empty_query_cancels_instead_of_committing() {
-        let mut app = vim_app(&["one", "two"]);
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-        handle_key(&mut app, key(KeyCode::Esc), 1);
-
-        assert!(!app.is_searching());
-        assert_eq!(app.search_text(), None);
-        assert!(!app.should_quit);
-    }
-
-    #[test]
-    fn vim_esc_on_committed_filter_clears_it_before_quitting() {
-        let mut app = vim_app(&["backend", "frontend"]);
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
-        handle_key(&mut app, key(KeyCode::Esc), 1); // commit filter, -> NORMAL
-
-        handle_key(&mut app, key(KeyCode::Esc), 1); // first NORMAL Esc: clear filter
-        assert_eq!(app.search_text(), None);
-        assert!(!app.should_quit);
-        assert_eq!(app.visible_session_count(), 2);
-
-        handle_key(&mut app, key(KeyCode::Esc), 1); // second: no filter left, quits
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn vim_q_quits_immediately_even_with_a_committed_filter() {
-        let mut app = vim_app(&["backend", "frontend"]);
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
-        handle_key(&mut app, key(KeyCode::Esc), 1); // commit filter, -> NORMAL
-
-        handle_key(&mut app, key(KeyCode::Char('q')), 1);
-
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn vim_slash_after_committed_filter_starts_a_fresh_search() {
-        let mut app = vim_app(&["backend", "frontend"]);
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
-        handle_key(&mut app, key(KeyCode::Esc), 1); // commit filter, -> NORMAL
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-
-        assert!(app.is_searching());
-        assert_eq!(app.search_text(), Some(""));
-    }
-
-    #[test]
-    fn vim_plain_letters_do_not_filter_in_normal_mode() {
-        let mut app = vim_app(&["alpha", "beta"]);
-
-        handle_key(&mut app, key(KeyCode::Char('a')), 1);
-
-        assert!(!app.is_searching());
-        assert_eq!(app.search_text(), None);
-    }
-
-    #[test]
-    fn vim_q_quits_in_normal_mode() {
-        let mut app = vim_app(&["queue"]);
-
-        handle_key(&mut app, key(KeyCode::Char('q')), 1);
-
-        assert!(app.should_quit);
-        assert!(!app.is_searching());
-    }
-
-    #[test]
-    fn vim_esc_quits_in_normal_mode() {
-        let mut app = vim_app(&["one"]);
-
-        handle_key(&mut app, key(KeyCode::Esc), 1);
-
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn vim_enter_marks_app_for_switch() {
-        let mut app = vim_app(&["one"]);
-
-        handle_key(&mut app, key(KeyCode::Enter), 1);
-
+    fn alt_digits_select_and_switch_to_matching_card() {
+        let mut app = app(9);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('6'), KeyModifiers::ALT),
+            3,
+        );
+        assert_eq!(app.selected_index, 5);
         assert!(app.should_switch);
     }
 
     #[test]
-    fn vim_ctrl_c_still_quits() {
-        // Ctrl-C is handled before the mode dispatch, so it works in vim mode too.
-        let mut app = vim_app(&["one"]);
-
+    fn alt_digit_without_a_matching_card_does_nothing() {
+        let mut app = app(3);
+        app.selected_index = 1;
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            1,
+            KeyEvent::new(KeyCode::Char('9'), KeyModifiers::ALT),
+            2,
         );
-
-        assert!(app.should_quit);
+        assert_eq!(app.selected_index, 1);
+        assert!(!app.should_switch);
     }
 
     #[test]
-    fn q_filters_instead_of_quitting() {
-        let mut app = App::new(vec![session("queue")], None);
-
-        handle_key(&mut app, key(KeyCode::Char('q')), 1);
-
-        assert_eq!(app.search_text(), Some("q"));
+    fn plain_characters_do_nothing() {
+        let mut app = app(2);
+        handle_key(&mut app, key(KeyCode::Char('f')), 2);
+        handle_key(&mut app, key(KeyCode::Char('/')), 2);
+        handle_key(&mut app, key(KeyCode::Char('q')), 2);
+        assert_eq!(app.selected_index, 0);
+        assert!(!app.should_switch);
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn arrow_keys_move_selection() {
+        let mut app = app(4);
+        handle_key(&mut app, key(KeyCode::Right), 2);
+        handle_key(&mut app, key(KeyCode::Down), 2);
+        assert_eq!(app.selected_index, 3);
+        handle_key(&mut app, key(KeyCode::Left), 2);
+        assert_eq!(app.selected_index, 2);
+    }
+
+    #[test]
+    fn horizontal_navigation_crosses_rows_and_wraps() {
+        let mut app = app(4);
+        app.selected_index = 3;
+        handle_key(&mut app, key(KeyCode::Right), 3);
+        assert_eq!(app.selected_index, 0);
+        handle_key(&mut app, key(KeyCode::Left), 3);
+        assert_eq!(app.selected_index, 3);
     }
 
     #[test]
     fn enter_marks_app_for_switch() {
-        let mut app = App::new(vec![session("one")], None);
-
+        let mut app = app(1);
         handle_key(&mut app, key(KeyCode::Enter), 1);
-
         assert!(app.should_switch);
     }
 
     #[test]
-    fn ctrl_c_marks_app_for_exit() {
-        let mut app = App::new(vec![session("one")], None);
+    fn esc_and_ctrl_c_quit() {
+        let mut escape_app = app(1);
+        handle_key(&mut escape_app, key(KeyCode::Esc), 1);
+        assert!(escape_app.should_quit);
 
+        let mut ctrl_c_app = app(1);
         handle_key(
-            &mut app,
+            &mut ctrl_c_app,
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             1,
         );
-
-        assert!(app.should_quit);
+        assert!(ctrl_c_app.should_quit);
     }
 
     #[test]
-    fn alt_e_does_not_quit_without_configured_toggle_key() {
-        let mut app = App::new(vec![session("one")], None);
-
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
-            1,
-        );
-
-        assert!(!app.should_quit);
-        assert!(!app.should_switch);
-    }
-
-    #[test]
-    fn configured_alt_e_marks_app_for_exit() {
-        let mut app = App::new(vec![session("one")], None);
-        let toggle_key = ToggleKey::from_tmux_key("M-e");
-
+    fn configured_toggle_key_quits() {
+        let mut app = app(1);
         handle_key_with_toggle(
             &mut app,
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
             1,
-            toggle_key,
+            ToggleKey::from_tmux_key("M-e"),
         );
-
-        assert!(app.should_quit);
-        assert!(!app.should_switch);
-    }
-
-    #[test]
-    fn plain_toggle_key_is_typeable_while_searching() {
-        let mut app = App::new(vec![session("session")], None);
-        let toggle_key = ToggleKey::from_tmux_key("s");
-        app.start_search();
-        app.push_search_char('e');
-
-        // `s` is the toggle key, but while searching it must filter, not quit.
-        handle_key_with_toggle(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
-            1,
-            toggle_key,
-        );
-
-        assert!(!app.should_quit);
-        assert_eq!(app.search_text(), Some("es"));
-    }
-
-    #[test]
-    fn uppercase_toggle_key_is_typeable_while_searching() {
-        let mut app = App::new(vec![session("Editor")], None);
-        // `@tmux-expose-key 'E'` yields a toggle of Char('E') + SHIFT.
-        let toggle_key = ToggleKey::from_tmux_key("E");
-        app.start_search();
-
-        handle_key_with_toggle(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT),
-            1,
-            toggle_key,
-        );
-
-        assert!(!app.should_quit);
-        assert_eq!(app.search_text(), Some("E"));
-    }
-
-    #[test]
-    fn plain_toggle_key_still_quits_when_not_searching() {
-        let mut app = App::new(vec![session("one")], None);
-        let toggle_key = ToggleKey::from_tmux_key("s");
-
-        handle_key_with_toggle(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
-            1,
-            toggle_key,
-        );
-
         assert!(app.should_quit);
     }
 
     #[test]
-    fn modified_toggle_key_still_quits_while_searching() {
-        let mut app = App::new(vec![session("one")], None);
-        let toggle_key = ToggleKey::from_tmux_key("M-e");
-        app.start_search();
-        app.push_search_char('o');
-
-        // A modified chord can't be typed into the filter, so it still closes.
-        handle_key_with_toggle(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
-            1,
-            toggle_key,
-        );
-
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn left_click_on_session_marks_it_for_switch() {
-        let mut app = App::new(vec![session("one"), session("two"), session("three")], None);
+    fn left_click_selects_and_switches() {
+        let mut app = app(3);
         let mouse = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 40,
             row: 1,
             modifiers: KeyModifiers::NONE,
         };
-
         handle_mouse(&mut app, mouse, Rect::new(0, 0, 100, 20), None, Some(3));
-
         assert_eq!(app.selected_index, 1);
         assert!(app.should_switch);
-        assert!(!app.should_quit);
-    }
-
-    #[test]
-    fn characters_start_filtering_without_slash() {
-        let mut app = App::new(
-            vec![session("backend"), session("frontend"), session("database")],
-            None,
-        );
-
-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
-
-        assert!(app.is_searching());
-        assert_eq!(app.search_text(), Some("f"));
-        assert_eq!(app.visible_session_count(), 1);
-        assert_eq!(app.selected_session().unwrap().name, "frontend");
-    }
-
-    #[test]
-    fn slash_filters_instead_of_starting_empty_search() {
-        let mut app = App::new(vec![session("docs/api")], None);
-
-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
-
-        assert_eq!(app.search_text(), Some("/"));
-        assert_eq!(app.visible_session_count(), 1);
-        assert_eq!(app.selected_session().unwrap().name, "docs/api");
-    }
-
-    #[test]
-    fn characters_continue_filtering_while_searching() {
-        let mut app = App::new(
-            vec![session("backend"), session("frontend"), session("database")],
-            None,
-        );
-
-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
-        handle_key(&mut app, key(KeyCode::Char('r')), 1);
-
-        assert_eq!(app.search_text(), Some("fr"));
-        assert_eq!(app.visible_session_count(), 1);
-        assert_eq!(app.selected_session().unwrap().name, "frontend");
-    }
-
-    #[test]
-    fn esc_clears_search_before_quitting() {
-        let mut app = App::new(vec![session("one")], None);
-
-        handle_key(&mut app, key(KeyCode::Char('o')), 1);
-        handle_key(&mut app, key(KeyCode::Esc), 1);
-
-        assert!(!app.is_searching());
-        assert!(!app.should_quit);
-    }
-
-    #[test]
-    fn esc_quits_when_search_query_is_empty() {
-        let mut app = App::new(vec![session("one")], None);
-
-        handle_key(&mut app, key(KeyCode::Char('o')), 1);
-        handle_key(&mut app, key(KeyCode::Backspace), 1);
-        handle_key(&mut app, key(KeyCode::Esc), 1);
-
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn backspace_edits_search_query() {
-        let mut app = App::new(vec![session("frontend")], None);
-
-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
-        handle_key(&mut app, key(KeyCode::Backspace), 1);
-
-        assert_eq!(app.search_text(), Some(""));
-    }
-
-    #[test]
-    fn horizontal_navigation_crosses_rows_and_wraps() {
-        let mut app = App::new(
-            vec![
-                session("one"),
-                session("two"),
-                session("three"),
-                session("four"),
-            ],
-            None,
-        );
-        app.selected_index = 2;
-
-        handle_key(&mut app, key(KeyCode::Right), 3);
-        assert_eq!(app.selected_index, 3);
-
-        handle_key(&mut app, key(KeyCode::Right), 3);
-        assert_eq!(app.selected_index, 0);
-
-        handle_key(&mut app, key(KeyCode::Left), 3);
-        assert_eq!(app.selected_index, 3);
     }
 }

@@ -1,0 +1,1414 @@
+commit 8be783b78e06ea509e2fe2d97a8cc4696c7aec33
+Author: Piotr Gabryjeluk <gabrys@dropbox.com>
+Date:   Wed Sep 30 21:47:11 2026 +0000
+
+    Customize tmux expose pane picker
+
+diff --git a/README.md b/README.md
+index 4c7d904..633035e 100644
+--- a/README.md
++++ b/README.md
+@@ -84,7 +84,6 @@ set -g @tmux-expose-border-style 'fg=colour245'
+ set -g @tmux-expose-selected-color 'yellow'
+ set -g @tmux-expose-attached-color 'green'
+ set -g @tmux-expose-inactive-color 'white'
+-set -g @tmux-expose-vim-keys 'on'
+ set -g @tmux-expose-command 'tmux-expose --columns 2'
+ 
+ set -g @plugin 'cesarferreira/tmux.expose'
+@@ -131,32 +130,6 @@ The same colors are also available as CLI flags when running the binary directly
+ tmux-expose --selected-color '#bd93f9' --attached-color '#50fa7b' --inactive-color '#6272a4'
+ ```
+ 
+-### Vim navigation
+-
+-Set `@tmux-expose-vim-keys 'on'` (or run `tmux-expose --vim`) to switch the picker to modal
+-vim keys. It is off by default, leaving the standard type-to-filter behavior unchanged.
+-
+-When enabled, the picker starts in **normal** mode:
+-
+-| Key | Action |
+-|---|---|
+-| `h` `j` `k` `l` (or arrows) | Move the selection |
+-| `/` | Enter search mode |
+-| `Enter` | Switch to the selected pane |
+-| `q` / `Esc` | Quit |
+-
+-Pressing `/` enters **search** mode, where typing fuzzy-filters as usual (so `h/j/k/l`
+-become text again). `Esc` commits whatever you typed as a filter and drops back into
+-**normal** mode — Telescope-style — so `hjkl` browses the filtered results instead of
+-typing into them; `Enter` switches straight from either mode. Press `/` again to start a
+-fresh search, or `Esc` a second time (from normal mode, with a filter still applied) to
+-clear it. Escaping an empty query cancels instead of applying an empty filter.
+-
+-> **Note:** `@tmux-expose-vim-keys` works by appending `--vim` to `@tmux-expose-command`
+-> (which defaults to `tmux-expose`). If you point `@tmux-expose-command` at a custom wrapper
+-> script, make sure it accepts `--vim` — or set the flag there yourself instead. The
+-> `@tmux-expose-*-color` options behave the same way.
+-
+ ## Custom Example
+ 
+ This configuration binds tmux.expose to `prefix + s` and opens it as a bottom-anchored popup
+@@ -230,16 +203,12 @@ tmux-expose --selected-color cyan --attached-color green --inactive-color white
+ 
+ | Key | Action |
+ |---|---|
+-| `Type` | Filter panes by fuzzy name |
+ | `Arrow keys` | Move selection |
++| `Alt-1` … `Alt-9` | Switch directly to the first … ninth pane |
+ | `Mouse click` | Switch to clicked pane |
+-| `Backspace` | Edit search query |
+-| `Esc` while searching | Clear search |
+ | `Enter` | Switch to selected pane |
+ | `Esc` / `Ctrl-C` | Quit without switching |
+ 
+-Prefer vim keys? See [Vim navigation](#vim-navigation) for an opt-in `hjkl` mode.
+-
+ <a id="tmux-plugin"></a>
+ 
+ 
+diff --git a/src/input.rs b/src/input.rs
+index 78c08b2..94938cc 100644
+--- a/src/input.rs
++++ b/src/input.rs
+@@ -54,60 +54,27 @@ pub fn handle_key_with_toggle(
+         return;
+     }
+ 
+-    if toggle_key.is_some_and(|toggle_key| toggle_key.matches(key)) {
+-        // A typeable toggle key — e.g. `e`/`E` from a `prefix + e` binding — must
+-        // stay usable as filter input while searching, so only close on it when a
+-        // query is not being entered. A modified toggle (e.g. M-e) can't be typed
+-        // into the filter, so it still closes from anywhere.
+-        let typeable_during_search = app.is_searching() && is_typeable_filter_key(key);
+-        if !typeable_during_search {
+-            app.should_quit = true;
+-            return;
++    if let (KeyCode::Char(digit @ '1'..='9'), KeyModifiers::ALT) = (key.code, key.modifiers) {
++        let index = digit as usize - '1' as usize;
++        if index < app.visible_session_count() {
++            app.selected_index = index;
++            app.should_switch = true;
+         }
+-    }
+-
+-    if app.is_searching() {
+-        handle_search_key(app, key, columns);
+         return;
+     }
+ 
+-    if app.vim_keys {
+-        handle_vim_normal_key(app, key, columns);
++    if toggle_key.is_some_and(|toggle_key| toggle_key.matches(key)) {
++        app.should_quit = true;
+         return;
+     }
+ 
+-    handle_default_key(app, key, columns);
+-}
+-
+-/// Default mode: typing any character immediately fuzzy-filters the list.
+-fn handle_default_key(app: &mut App, key: KeyEvent, columns: usize) {
+     match (key.code, key.modifiers) {
+         (KeyCode::Esc, _) => app.should_quit = true,
+         (KeyCode::Enter, _) => app.should_switch = true,
+-        (KeyCode::Left, _) => move_left(app, columns),
+-        (KeyCode::Right, _) => move_right(app, columns),
++        (KeyCode::Left, _) => app.move_left(),
++        (KeyCode::Right, _) => app.move_right(),
+         (KeyCode::Up, _) => app.move_up(columns),
+         (KeyCode::Down, _) => app.move_down(columns),
+-        (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => push_filter_char(app, ch),
+-        _ => {}
+-    }
+-}
+-
+-/// Vim NORMAL mode: hjkl (and arrows) move the selection, `/` enters search.
+-/// An applied-but-not-editing filter (see `App::stop_editing_search`) is
+-/// still active here — Esc clears that filter before it falls back to
+-/// quitting, so a filtered browse needs two Escs to close, same as `q`
+-/// always does in one.
+-fn handle_vim_normal_key(app: &mut App, key: KeyEvent, columns: usize) {
+-    match (key.code, key.modifiers) {
+-        (KeyCode::Esc, _) if app.search_text().is_some() => app.clear_search(),
+-        (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => app.should_quit = true,
+-        (KeyCode::Enter, _) => app.should_switch = true,
+-        (KeyCode::Char('/'), KeyModifiers::NONE) => app.start_search(),
+-        (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => move_left(app, columns),
+-        (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => move_right(app, columns),
+-        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => app.move_up(columns),
+-        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => app.move_down(columns),
+         _ => {}
+     }
+ }
+@@ -146,60 +113,10 @@ fn contains(area: Rect, x: u16, y: u16) -> bool {
+         && y < area.y.saturating_add(area.height)
+ }
+ 
+-/// Keys the search filter accepts as text input — matching the `Char` arm in
+-/// `handle_search_key`. Uppercase keys arrive with `SHIFT`, so both lower- and
+-/// uppercase configured toggle keys count as typeable.
+-fn is_typeable_filter_key(key: KeyEvent) -> bool {
+-    matches!(key.code, KeyCode::Char(_))
+-        && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+-}
+-
+-fn handle_search_key(app: &mut App, key: KeyEvent, columns: usize) {
+-    match (key.code, key.modifiers) {
+-        // Vim mode: Esc on an empty query cancels (nothing to keep); Esc on
+-        // a typed query commits it as a filter and drops into NORMAL mode —
+-        // hjkl then browses the filtered results instead of typing into it.
+-        (KeyCode::Esc, _) if app.vim_keys && app.search_text().is_some_and(str::is_empty) => {
+-            app.clear_search();
+-        }
+-        (KeyCode::Esc, _) if app.vim_keys => app.stop_editing_search(),
+-        (KeyCode::Esc, _) if app.search_text().is_some_and(str::is_empty) => app.should_quit = true,
+-        (KeyCode::Esc, _) => app.clear_search(),
+-        (KeyCode::Enter, _) => app.should_switch = true,
+-        (KeyCode::Backspace, _) => app.pop_search_char(),
+-        (KeyCode::Left, _) => move_left(app, columns),
+-        (KeyCode::Right, _) => move_right(app, columns),
+-        (KeyCode::Up, _) => app.move_up(columns),
+-        (KeyCode::Down, _) => app.move_down(columns),
+-        (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => push_filter_char(app, ch),
+-        _ => {}
+-    }
+-}
+-
+-fn push_filter_char(app: &mut App, ch: char) {
+-    if !app.is_searching() {
+-        app.start_search();
+-    }
+-    app.push_search_char(ch);
+-}
+-
+-fn move_left(app: &mut App, _columns: usize) {
+-    app.move_left();
+-}
+-
+-fn move_right(app: &mut App, _columns: usize) {
+-    app.move_right();
+-}
+-
+ #[cfg(test)]
+ mod tests {
+-    use crossterm::event::{
+-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+-    };
+-    use ratatui::layout::Rect;
+-
+     use super::*;
+-    use crate::model::{App, Session};
++    use crate::model::Session;
+ 
+     fn key(code: KeyCode) -> KeyEvent {
+         KeyEvent::new(code, KeyModifiers::NONE)
+@@ -217,482 +134,116 @@ mod tests {
+         }
+     }
+ 
+-    #[test]
+-    fn arrow_keys_move_selection() {
+-        let mut app = App::new(vec![session("one"), session("two"), session("three")], None);
+-
+-        handle_key(&mut app, key(KeyCode::Right), 2);
+-        assert_eq!(app.selected_index, 1);
+-
+-        handle_key(&mut app, key(KeyCode::Down), 2);
+-        assert_eq!(app.selected_index, 2);
+-
+-        handle_key(&mut app, key(KeyCode::Left), 2);
+-        assert_eq!(app.selected_index, 1);
+-    }
+-
+-    #[test]
+-    fn hjkl_filter_instead_of_moving() {
+-        let mut app = App::new(vec![session("one"), session("two"), session("three")], None);
+-
+-        handle_key(&mut app, key(KeyCode::Char('h')), 2);
+-
+-        assert_eq!(app.selected_index, 0);
+-        assert_eq!(app.search_text(), Some("h"));
+-    }
+-
+-    fn vim_app(names: &[&str]) -> App {
+-        let mut app = App::new(names.iter().map(|name| session(name)).collect(), None);
+-        app.vim_keys = true;
+-        app
+-    }
+-
+-    #[test]
+-    fn vim_hjkl_move_selection_without_filtering() {
+-        let mut app = vim_app(&["one", "two", "three", "four"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('l')), 2); // right
+-        assert_eq!(app.selected_index, 1);
+-
+-        handle_key(&mut app, key(KeyCode::Char('j')), 2); // down
+-        assert_eq!(app.selected_index, 3);
+-
+-        handle_key(&mut app, key(KeyCode::Char('h')), 2); // left
+-        assert_eq!(app.selected_index, 2);
+-
+-        handle_key(&mut app, key(KeyCode::Char('k')), 2); // up
+-        assert_eq!(app.selected_index, 0);
+-
+-        // hjkl must not leak into the search filter while navigating.
+-        assert!(!app.is_searching());
+-    }
+-
+-    #[test]
+-    fn vim_arrows_still_move_selection() {
+-        let mut app = vim_app(&["one", "two", "three"]);
+-
+-        handle_key(&mut app, key(KeyCode::Right), 2);
+-        assert_eq!(app.selected_index, 1);
+-
+-        handle_key(&mut app, key(KeyCode::Down), 2);
+-        assert_eq!(app.selected_index, 2);
+-    }
+-
+-    #[test]
+-    fn vim_slash_enters_search_mode() {
+-        let mut app = vim_app(&["one", "two"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-
+-        assert!(app.is_searching());
+-        assert_eq!(app.search_text(), Some(""));
+-    }
+-
+-    #[test]
+-    fn vim_typing_in_search_filters_including_hjkl() {
+-        let mut app = vim_app(&["backend", "frontend", "hjkl-box"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-        handle_key(&mut app, key(KeyCode::Char('h')), 1);
+-
+-        assert_eq!(app.search_text(), Some("h"));
+-        assert_eq!(app.selected_session().unwrap().name, "hjkl-box");
+-    }
+-
+-    #[test]
+-    fn vim_esc_in_search_returns_to_normal_without_quitting() {
+-        let mut app = vim_app(&["one", "two"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-        handle_key(&mut app, key(KeyCode::Char('o')), 1);
+-        handle_key(&mut app, key(KeyCode::Esc), 1);
+-
+-        assert!(!app.is_searching());
+-        assert!(!app.should_quit);
+-    }
+-
+-    #[test]
+-    fn vim_esc_on_typed_query_keeps_it_as_a_filter() {
+-        // The actual bug this exists to pin: Esc used to discard the query
+-        // outright. It should commit it instead, Telescope-style, so hjkl
+-        // can browse the filtered results afterward.
+-        let mut app = vim_app(&["backend", "database", "notes"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-        handle_key(&mut app, key(KeyCode::Char('d')), 1);
+-        handle_key(&mut app, key(KeyCode::Esc), 1);
+-
+-        assert!(!app.is_searching());
+-        assert_eq!(app.search_text(), Some("d"));
+-        assert_eq!(app.visible_session_count(), 2); // backend, database (not notes)
+-    }
+-
+-    #[test]
+-    fn vim_hjkl_navigates_a_filter_committed_by_esc() {
+-        let mut app = vim_app(&["backend", "database", "notes"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-        handle_key(&mut app, key(KeyCode::Char('d')), 1);
+-        handle_key(&mut app, key(KeyCode::Esc), 1);
+-        assert_eq!(app.selected_session().unwrap().name, "backend");
+-
+-        // If Esc failed to leave text-entry, 'j' would filter instead of moving.
+-        handle_key(&mut app, key(KeyCode::Char('j')), 1);
+-
+-        assert_eq!(app.search_text(), Some("d"));
+-        assert_eq!(app.selected_session().unwrap().name, "database");
+-    }
+-
+-    #[test]
+-    fn vim_esc_on_empty_query_cancels_instead_of_committing() {
+-        let mut app = vim_app(&["one", "two"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-        handle_key(&mut app, key(KeyCode::Esc), 1);
+-
+-        assert!(!app.is_searching());
+-        assert_eq!(app.search_text(), None);
+-        assert!(!app.should_quit);
+-    }
+-
+-    #[test]
+-    fn vim_esc_on_committed_filter_clears_it_before_quitting() {
+-        let mut app = vim_app(&["backend", "frontend"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
+-        handle_key(&mut app, key(KeyCode::Esc), 1); // commit filter, -> NORMAL
+-
+-        handle_key(&mut app, key(KeyCode::Esc), 1); // first NORMAL Esc: clear filter
+-        assert_eq!(app.search_text(), None);
+-        assert!(!app.should_quit);
+-        assert_eq!(app.visible_session_count(), 2);
+-
+-        handle_key(&mut app, key(KeyCode::Esc), 1); // second: no filter left, quits
+-        assert!(app.should_quit);
+-    }
+-
+-    #[test]
+-    fn vim_q_quits_immediately_even_with_a_committed_filter() {
+-        let mut app = vim_app(&["backend", "frontend"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
+-        handle_key(&mut app, key(KeyCode::Esc), 1); // commit filter, -> NORMAL
+-
+-        handle_key(&mut app, key(KeyCode::Char('q')), 1);
+-
+-        assert!(app.should_quit);
+-    }
+-
+-    #[test]
+-    fn vim_slash_after_committed_filter_starts_a_fresh_search() {
+-        let mut app = vim_app(&["backend", "frontend"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
+-        handle_key(&mut app, key(KeyCode::Esc), 1); // commit filter, -> NORMAL
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-
+-        assert!(app.is_searching());
+-        assert_eq!(app.search_text(), Some(""));
+-    }
+-
+-    #[test]
+-    fn vim_plain_letters_do_not_filter_in_normal_mode() {
+-        let mut app = vim_app(&["alpha", "beta"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('a')), 1);
+-
+-        assert!(!app.is_searching());
+-        assert_eq!(app.search_text(), None);
+-    }
+-
+-    #[test]
+-    fn vim_q_quits_in_normal_mode() {
+-        let mut app = vim_app(&["queue"]);
+-
+-        handle_key(&mut app, key(KeyCode::Char('q')), 1);
+-
+-        assert!(app.should_quit);
+-        assert!(!app.is_searching());
+-    }
+-
+-    #[test]
+-    fn vim_esc_quits_in_normal_mode() {
+-        let mut app = vim_app(&["one"]);
+-
+-        handle_key(&mut app, key(KeyCode::Esc), 1);
+-
+-        assert!(app.should_quit);
+-    }
+-
+-    #[test]
+-    fn vim_enter_marks_app_for_switch() {
+-        let mut app = vim_app(&["one"]);
+-
+-        handle_key(&mut app, key(KeyCode::Enter), 1);
+-
+-        assert!(app.should_switch);
++    fn app(count: usize) -> App {
++        App::new(
++            (1..=count)
++                .map(|index| session(&index.to_string()))
++                .collect(),
++            None,
++        )
+     }
+ 
+     #[test]
+-    fn vim_ctrl_c_still_quits() {
+-        // Ctrl-C is handled before the mode dispatch, so it works in vim mode too.
+-        let mut app = vim_app(&["one"]);
+-
++    fn alt_digits_select_and_switch_to_matching_card() {
++        let mut app = app(9);
+         handle_key(
+             &mut app,
+-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+-            1,
++            KeyEvent::new(KeyCode::Char('6'), KeyModifiers::ALT),
++            3,
+         );
+-
+-        assert!(app.should_quit);
+-    }
+-
+-    #[test]
+-    fn q_filters_instead_of_quitting() {
+-        let mut app = App::new(vec![session("queue")], None);
+-
+-        handle_key(&mut app, key(KeyCode::Char('q')), 1);
+-
+-        assert_eq!(app.search_text(), Some("q"));
+-        assert!(!app.should_quit);
+-    }
+-
+-    #[test]
+-    fn enter_marks_app_for_switch() {
+-        let mut app = App::new(vec![session("one")], None);
+-
+-        handle_key(&mut app, key(KeyCode::Enter), 1);
+-
++        assert_eq!(app.selected_index, 5);
+         assert!(app.should_switch);
+     }
+ 
+     #[test]
+-    fn ctrl_c_marks_app_for_exit() {
+-        let mut app = App::new(vec![session("one")], None);
+-
++    fn alt_digit_without_a_matching_card_does_nothing() {
++        let mut app = app(3);
++        app.selected_index = 1;
+         handle_key(
+             &mut app,
+-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+-            1,
++            KeyEvent::new(KeyCode::Char('9'), KeyModifiers::ALT),
++            2,
+         );
+-
+-        assert!(app.should_quit);
++        assert_eq!(app.selected_index, 1);
++        assert!(!app.should_switch);
+     }
+ 
+     #[test]
+-    fn alt_e_does_not_quit_without_configured_toggle_key() {
+-        let mut app = App::new(vec![session("one")], None);
+-
+-        handle_key(
+-            &mut app,
+-            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
+-            1,
+-        );
+-
+-        assert!(!app.should_quit);
++    fn plain_characters_do_nothing() {
++        let mut app = app(2);
++        handle_key(&mut app, key(KeyCode::Char('f')), 2);
++        handle_key(&mut app, key(KeyCode::Char('/')), 2);
++        handle_key(&mut app, key(KeyCode::Char('q')), 2);
++        assert_eq!(app.selected_index, 0);
+         assert!(!app.should_switch);
++        assert!(!app.should_quit);
+     }
+ 
+     #[test]
+-    fn configured_alt_e_marks_app_for_exit() {
+-        let mut app = App::new(vec![session("one")], None);
+-        let toggle_key = ToggleKey::from_tmux_key("M-e");
+-
+-        handle_key_with_toggle(
+-            &mut app,
+-            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
+-            1,
+-            toggle_key,
+-        );
+-
+-        assert!(app.should_quit);
+-        assert!(!app.should_switch);
++    fn arrow_keys_move_selection() {
++        let mut app = app(4);
++        handle_key(&mut app, key(KeyCode::Right), 2);
++        handle_key(&mut app, key(KeyCode::Down), 2);
++        assert_eq!(app.selected_index, 3);
++        handle_key(&mut app, key(KeyCode::Left), 2);
++        assert_eq!(app.selected_index, 2);
+     }
+ 
+     #[test]
+-    fn plain_toggle_key_is_typeable_while_searching() {
+-        let mut app = App::new(vec![session("session")], None);
+-        let toggle_key = ToggleKey::from_tmux_key("s");
+-        app.start_search();
+-        app.push_search_char('e');
+-
+-        // `s` is the toggle key, but while searching it must filter, not quit.
+-        handle_key_with_toggle(
+-            &mut app,
+-            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+-            1,
+-            toggle_key,
+-        );
+-
+-        assert!(!app.should_quit);
+-        assert_eq!(app.search_text(), Some("es"));
++    fn horizontal_navigation_crosses_rows_and_wraps() {
++        let mut app = app(4);
++        app.selected_index = 3;
++        handle_key(&mut app, key(KeyCode::Right), 3);
++        assert_eq!(app.selected_index, 0);
++        handle_key(&mut app, key(KeyCode::Left), 3);
++        assert_eq!(app.selected_index, 3);
+     }
+ 
+     #[test]
+-    fn uppercase_toggle_key_is_typeable_while_searching() {
+-        let mut app = App::new(vec![session("Editor")], None);
+-        // `@tmux-expose-key 'E'` yields a toggle of Char('E') + SHIFT.
+-        let toggle_key = ToggleKey::from_tmux_key("E");
+-        app.start_search();
+-
+-        handle_key_with_toggle(
+-            &mut app,
+-            KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT),
+-            1,
+-            toggle_key,
+-        );
+-
+-        assert!(!app.should_quit);
+-        assert_eq!(app.search_text(), Some("E"));
++    fn enter_marks_app_for_switch() {
++        let mut app = app(1);
++        handle_key(&mut app, key(KeyCode::Enter), 1);
++        assert!(app.should_switch);
+     }
+ 
+     #[test]
+-    fn plain_toggle_key_still_quits_when_not_searching() {
+-        let mut app = App::new(vec![session("one")], None);
+-        let toggle_key = ToggleKey::from_tmux_key("s");
++    fn esc_and_ctrl_c_quit() {
++        let mut escape_app = app(1);
++        handle_key(&mut escape_app, key(KeyCode::Esc), 1);
++        assert!(escape_app.should_quit);
+ 
+-        handle_key_with_toggle(
+-            &mut app,
+-            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
++        let mut ctrl_c_app = app(1);
++        handle_key(
++            &mut ctrl_c_app,
++            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+             1,
+-            toggle_key,
+         );
+-
+-        assert!(app.should_quit);
++        assert!(ctrl_c_app.should_quit);
+     }
+ 
+     #[test]
+-    fn modified_toggle_key_still_quits_while_searching() {
+-        let mut app = App::new(vec![session("one")], None);
+-        let toggle_key = ToggleKey::from_tmux_key("M-e");
+-        app.start_search();
+-        app.push_search_char('o');
+-
+-        // A modified chord can't be typed into the filter, so it still closes.
++    fn configured_toggle_key_quits() {
++        let mut app = app(1);
+         handle_key_with_toggle(
+             &mut app,
+             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
+             1,
+-            toggle_key,
++            ToggleKey::from_tmux_key("M-e"),
+         );
+-
+         assert!(app.should_quit);
+     }
+ 
+     #[test]
+-    fn left_click_on_session_marks_it_for_switch() {
+-        let mut app = App::new(vec![session("one"), session("two"), session("three")], None);
++    fn left_click_selects_and_switches() {
++        let mut app = app(3);
+         let mouse = MouseEvent {
+             kind: MouseEventKind::Down(MouseButton::Left),
+             column: 40,
+             row: 1,
+             modifiers: KeyModifiers::NONE,
+         };
+-
+         handle_mouse(&mut app, mouse, Rect::new(0, 0, 100, 20), None, Some(3));
+-
+         assert_eq!(app.selected_index, 1);
+         assert!(app.should_switch);
+-        assert!(!app.should_quit);
+-    }
+-
+-    #[test]
+-    fn characters_start_filtering_without_slash() {
+-        let mut app = App::new(
+-            vec![session("backend"), session("frontend"), session("database")],
+-            None,
+-        );
+-
+-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
+-
+-        assert!(app.is_searching());
+-        assert_eq!(app.search_text(), Some("f"));
+-        assert_eq!(app.visible_session_count(), 1);
+-        assert_eq!(app.selected_session().unwrap().name, "frontend");
+-    }
+-
+-    #[test]
+-    fn slash_filters_instead_of_starting_empty_search() {
+-        let mut app = App::new(vec![session("docs/api")], None);
+-
+-        handle_key(&mut app, key(KeyCode::Char('/')), 1);
+-
+-        assert_eq!(app.search_text(), Some("/"));
+-        assert_eq!(app.visible_session_count(), 1);
+-        assert_eq!(app.selected_session().unwrap().name, "docs/api");
+-    }
+-
+-    #[test]
+-    fn characters_continue_filtering_while_searching() {
+-        let mut app = App::new(
+-            vec![session("backend"), session("frontend"), session("database")],
+-            None,
+-        );
+-
+-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
+-        handle_key(&mut app, key(KeyCode::Char('r')), 1);
+-
+-        assert_eq!(app.search_text(), Some("fr"));
+-        assert_eq!(app.visible_session_count(), 1);
+-        assert_eq!(app.selected_session().unwrap().name, "frontend");
+-    }
+-
+-    #[test]
+-    fn esc_clears_search_before_quitting() {
+-        let mut app = App::new(vec![session("one")], None);
+-
+-        handle_key(&mut app, key(KeyCode::Char('o')), 1);
+-        handle_key(&mut app, key(KeyCode::Esc), 1);
+-
+-        assert!(!app.is_searching());
+-        assert!(!app.should_quit);
+-    }
+-
+-    #[test]
+-    fn esc_quits_when_search_query_is_empty() {
+-        let mut app = App::new(vec![session("one")], None);
+-
+-        handle_key(&mut app, key(KeyCode::Char('o')), 1);
+-        handle_key(&mut app, key(KeyCode::Backspace), 1);
+-        handle_key(&mut app, key(KeyCode::Esc), 1);
+-
+-        assert!(app.should_quit);
+-    }
+-
+-    #[test]
+-    fn backspace_edits_search_query() {
+-        let mut app = App::new(vec![session("frontend")], None);
+-
+-        handle_key(&mut app, key(KeyCode::Char('f')), 1);
+-        handle_key(&mut app, key(KeyCode::Backspace), 1);
+-
+-        assert_eq!(app.search_text(), Some(""));
+-    }
+-
+-    #[test]
+-    fn horizontal_navigation_crosses_rows_and_wraps() {
+-        let mut app = App::new(
+-            vec![
+-                session("one"),
+-                session("two"),
+-                session("three"),
+-                session("four"),
+-            ],
+-            None,
+-        );
+-        app.selected_index = 2;
+-
+-        handle_key(&mut app, key(KeyCode::Right), 3);
+-        assert_eq!(app.selected_index, 3);
+-
+-        handle_key(&mut app, key(KeyCode::Right), 3);
+-        assert_eq!(app.selected_index, 0);
+-
+-        handle_key(&mut app, key(KeyCode::Left), 3);
+-        assert_eq!(app.selected_index, 3);
+     }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 1f0a949..e2a525e 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -36,10 +36,6 @@ struct Cli {
+ 
+     #[arg(long, value_name = "COLOR", value_parser = parse_color)]
+     inactive_color: Option<Color>,
+-
+-    /// Use modal vim navigation: hjkl to move, `/` to search, q/Esc to quit.
+-    #[arg(long)]
+-    vim: bool,
+ }
+ 
+ fn parse_color(value: &str) -> Result<Color, String> {
+@@ -95,12 +91,10 @@ fn main() -> Result<()> {
+         Ok(panes) => App::new(panes, current_pane_id.clone()),
+         Err(error) => {
+             let mut app = App::new(Vec::new(), current_pane_id.clone());
+-            app.error = Some(format!("{error}\n\nPress q or Esc to quit."));
++            app.error = Some(format!("{error}\n\nPress Esc or Ctrl-C to quit."));
+             app
+         }
+     };
+-    app.vim_keys = cli.vim;
+-
+     let mut colors = ui::CardColors::default();
+     if let Some(color) = cli.selected_color {
+         colors.selected = color;
+@@ -147,7 +141,7 @@ fn main() -> Result<()> {
+                 match tmux::select_pane(&selected_window, &selected_pane) {
+                     Ok(()) => break,
+                     Err(error) => {
+-                        app.error = Some(format!("{error}\n\nPress q or Esc to quit."));
++                        app.error = Some(format!("{error}\n\nPress Esc or Ctrl-C to quit."));
+                         app.should_switch = false;
+                     }
+                 }
+@@ -190,14 +184,11 @@ fn main() -> Result<()> {
+         if last_refresh.elapsed() >= refresh_interval {
+             match tmux::list_panes_skipping_preview_for(current_pane_id.as_deref()) {
+                 Ok(panes) => {
+-                    app.replace_sessions_preserving_preview_for(
+-                        panes,
+-                        current_pane_id.as_deref(),
+-                    );
++                    app.replace_sessions_preserving_preview_for(panes, current_pane_id.as_deref());
+                     app.error = None;
+                 }
+                 Err(error) => {
+-                    app.error = Some(format!("{error}\n\nPress q or Esc to quit."));
++                    app.error = Some(format!("{error}\n\nPress Esc or Ctrl-C to quit."));
+                 }
+             }
+             last_refresh = Instant::now();
+@@ -325,18 +316,4 @@ mod tests {
+         assert!(parse_color("colourize").is_err());
+         assert!(parse_color("colour999").is_err());
+     }
+-
+-    #[test]
+-    fn vim_defaults_to_off() {
+-        let cli = Cli::parse_from(["tmux-expose"]);
+-
+-        assert!(!cli.vim);
+-    }
+-
+-    #[test]
+-    fn parses_vim_flag() {
+-        let cli = Cli::parse_from(["tmux-expose", "--vim"]);
+-
+-        assert!(cli.vim);
+-    }
+ }
+diff --git a/src/model.rs b/src/model.rs
+index 86f162a..40d0634 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -19,16 +19,6 @@ pub struct App {
+     pub should_quit: bool,
+     pub should_switch: bool,
+     pub error: Option<String>,
+-    /// When true, the picker uses modal vim navigation (hjkl to move, `/` to search).
+-    pub vim_keys: bool,
+-    search_query: Option<String>,
+-    /// True while actively typing a query. In vim mode this is distinct from
+-    /// `search_query` being set: Esc leaves editing (so hjkl moves again) but
+-    /// keeps `search_query` as an applied filter, matching how Telescope-style
+-    /// pickers commit a search into normal-mode browsing instead of discarding
+-    /// it. Default mode has no normal-mode navigation to return to, so the two
+-    /// always stay in lockstep there — see `is_searching`.
+-    editing_search: bool,
+ }
+ 
+ impl App {
+@@ -45,9 +35,6 @@ impl App {
+             should_quit: false,
+             should_switch: false,
+             error: None,
+-            vim_keys: false,
+-            search_query: None,
+-            editing_search: false,
+         }
+     }
+ 
+@@ -56,64 +43,11 @@ impl App {
+     }
+ 
+     pub fn visible_sessions(&self) -> Vec<&Session> {
+-        match self.search_query.as_deref() {
+-            Some(query) => self
+-                .sessions
+-                .iter()
+-                .filter(|session| fuzzy_matches(&session.name, query))
+-                .collect(),
+-            None => self.sessions.iter().collect(),
+-        }
++        self.sessions.iter().collect()
+     }
+ 
+     pub fn visible_session_count(&self) -> usize {
+-        self.visible_sessions().len()
+-    }
+-
+-    pub fn start_search(&mut self) {
+-        self.search_query = Some(String::new());
+-        self.editing_search = true;
+-        self.selected_index = 0;
+-    }
+-
+-    pub fn push_search_char(&mut self, ch: char) {
+-        if let Some(query) = &mut self.search_query {
+-            query.push(ch);
+-            self.selected_index = 0;
+-        }
+-    }
+-
+-    pub fn pop_search_char(&mut self) {
+-        if let Some(query) = &mut self.search_query {
+-            query.pop();
+-            self.selected_index = 0;
+-        }
+-    }
+-
+-    pub fn clear_search(&mut self) {
+-        self.search_query = None;
+-        self.editing_search = false;
+-        self.selected_index = 0;
+-    }
+-
+-    /// Leaves text-entry but keeps `search_query` as an applied filter — vim
+-    /// mode's Esc-while-searching, so hjkl navigates the filtered results
+-    /// instead of discarding them.
+-    pub fn stop_editing_search(&mut self) {
+-        self.editing_search = false;
+-    }
+-
+-    /// Whether keystrokes should be treated as search text-entry right now.
+-    /// Also drives the toggle-key/typeable-filter check in `input.rs`. In
+-    /// vim mode this is `false` while a filter is applied but not being
+-    /// edited; in default mode it always matches `search_query.is_some()`,
+-    /// since default mode has no normal-mode navigation to drop into.
+-    pub fn is_searching(&self) -> bool {
+-        self.editing_search
+-    }
+-
+-    pub fn search_text(&self) -> Option<&str> {
+-        self.search_query.as_deref()
++        self.sessions.len()
+     }
+ 
+     pub fn replace_sessions(&mut self, sessions: Vec<Session>) {
+@@ -196,19 +130,6 @@ impl App {
+     }
+ }
+ 
+-fn fuzzy_matches(name: &str, query: &str) -> bool {
+-    let query = query.to_lowercase();
+-    if query.is_empty() {
+-        return true;
+-    }
+-
+-    let name = name.to_lowercase();
+-    let mut name_chars = name.chars();
+-    query
+-        .chars()
+-        .all(|query_ch| name_chars.any(|name_ch| name_ch == query_ch))
+-}
+-
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -301,55 +222,6 @@ mod tests {
+         assert_eq!(app.sessions[1].preview, vec!["live".to_string()]);
+     }
+ 
+-    #[test]
+-    fn search_filters_sessions_by_fuzzy_name() {
+-        let mut app = App::new(
+-            vec![
+-                session("backend-api"),
+-                session("frontend"),
+-                session("database"),
+-            ],
+-            None,
+-        );
+-
+-        app.start_search();
+-        app.push_search_char('b');
+-        app.push_search_char('a');
+-
+-        let names: Vec<&str> = app
+-            .visible_sessions()
+-            .into_iter()
+-            .map(|session| session.name.as_str())
+-            .collect();
+-        assert_eq!(names, vec!["backend-api", "database"]);
+-    }
+-
+-    #[test]
+-    fn selected_session_uses_filtered_selection() {
+-        let mut app = App::new(
+-            vec![session("backend"), session("frontend"), session("database")],
+-            None,
+-        );
+-
+-        app.start_search();
+-        app.push_search_char('f');
+-
+-        assert_eq!(app.selected_index, 0);
+-        assert_eq!(app.selected_session().unwrap().name, "frontend");
+-    }
+-
+-    #[test]
+-    fn clearing_search_restores_all_sessions() {
+-        let mut app = App::new(vec![session("backend"), session("frontend")], None);
+-
+-        app.start_search();
+-        app.push_search_char('f');
+-        app.clear_search();
+-
+-        assert!(!app.is_searching());
+-        assert_eq!(app.visible_session_count(), 2);
+-    }
+-
+     #[test]
+     fn up_from_first_row_keeps_selection_in_place() {
+         let mut app = App::new(vec![session("one"), session("two"), session("three")], None);
+diff --git a/src/tmux.rs b/src/tmux.rs
+index 4320fdf..055092f 100644
+--- a/src/tmux.rs
++++ b/src/tmux.rs
+@@ -208,9 +208,8 @@ mod tests {
+ 
+     #[test]
+     fn parses_pane_names_containing_colons() {
+-        let panes = parse_panes(
+-            "%3\\037@3\\037dev:api\\037fallback\\0370\\0371\\0370\\0371\\0370\n",
+-        );
++        let panes =
++            parse_panes("%3\\037@3\\037dev:api\\037fallback\\0370\\0371\\0370\\0371\\0370\n");
+ 
+         assert_eq!(panes[0].id, "%3");
+         assert_eq!(panes[0].name, "dev:api");
+@@ -218,9 +217,7 @@ mod tests {
+ 
+     #[test]
+     fn falls_back_to_window_name_when_status_format_is_empty() {
+-        let panes = parse_panes(
+-            "%4\\037@4\\037   \\037shell\\0370\\0371\\0370\\0371\\0370\n",
+-        );
++        let panes = parse_panes("%4\\037@4\\037   \\037shell\\0370\\0371\\0370\\0371\\0370\n");
+ 
+         assert_eq!(panes[0].name, "shell");
+     }
+@@ -239,9 +236,7 @@ mod tests {
+ 
+     #[test]
+     fn active_pane_in_an_inactive_window_is_not_attached() {
+-        let panes = parse_panes(
+-            "%4\\037@4\\037shell\\037fallback\\0370\\0371\\0370\\0371\\0370\n",
+-        );
++        let panes = parse_panes("%4\\037@4\\037shell\\037fallback\\0370\\0371\\0370\\0371\\0370\n");
+ 
+         assert!(!panes[0].attached);
+     }
+diff --git a/src/ui.rs b/src/ui.rs
+index 666cfdb..ad58f7c 100644
+--- a/src/ui.rs
++++ b/src/ui.rs
+@@ -68,10 +68,8 @@ pub fn render(
+         render_centered_message(
+             frame,
+             chunks[0],
+-            "No tmux panes found.\nPress q or Esc to quit.",
++            "No tmux panes found.\nPress Esc or Ctrl-C to quit.",
+         );
+-    } else if app.visible_session_count() == 0 {
+-        render_centered_message(frame, chunks[0], "No matching panes");
+     } else {
+         render_grid(
+             frame,
+@@ -83,11 +81,7 @@ pub fn render(
+         );
+     }
+ 
+-    let footer = Paragraph::new(footer_hint_line(
+-        app.search_text(),
+-        app.vim_keys,
+-        app.is_searching(),
+-    ));
++    let footer = Paragraph::new(footer_hint_line());
+     frame.render_widget(footer, chunks[1]);
+ }
+ 
+@@ -125,6 +119,7 @@ pub fn render_card(
+     colors: CardColors,
+     area: Rect,
+ ) {
++    let border_style = card_border_style(selected, current_attached, session.bell, colors);
+     let title = format!(
+         " {} ",
+         truncate(&session.name, area.width.saturating_sub(12) as usize)
+@@ -138,12 +133,7 @@ pub fn render_card(
+         .title_bottom(Line::from(bottom_spans).right_aligned())
+         .borders(Borders::ALL)
+         .border_type(card_border_type(session.bell))
+-        .border_style(card_border_style(
+-            selected,
+-            current_attached,
+-            session.bell,
+-            colors,
+-        ));
++        .border_style(border_style);
+ 
+     let preview_height = area.height.saturating_sub(2) as usize;
+     let mut lines = Vec::new();
+@@ -277,70 +267,17 @@ fn session_status_span(attached: bool) -> Span<'static> {
+     }
+ }
+ 
+-fn footer_hint_line(search_query: Option<&str>, vim_keys: bool, editing: bool) -> Line<'static> {
+-    match (vim_keys, editing, search_query) {
+-        // Vim SEARCH mode: typing filters; Esc commits it as a filter and
+-        // drops into NORMAL mode instead of discarding it.
+-        (true, true, Some(query)) => Line::from(vec![
+-            Span::styled(format!("Search: {query}"), Style::default().fg(Color::Cyan)),
+-            hint_text(" · type to filter · "),
+-            hint_key("Backspace"),
+-            hint_text(" to edit · "),
+-            hint_key("Enter"),
+-            hint_text(" to switch · "),
+-            hint_key("Esc"),
+-            hint_text(" to browse results"),
+-        ]),
+-        // Vim NORMAL mode with a filter committed from SEARCH mode: hjkl
+-        // still moves over the filtered results; Esc clears the filter
+-        // (a second Esc then quits, same as `q` always does in one).
+-        (true, false, Some(query)) => Line::from(vec![
+-            Span::styled(format!("Filter: {query}"), Style::default().fg(Color::Cyan)),
+-            hint_text(" · "),
+-            hint_key("hjkl"),
+-            hint_text(" to move · "),
+-            hint_key("/"),
+-            hint_text(" to edit · "),
+-            hint_key("Enter"),
+-            hint_text(" to switch · "),
+-            hint_key("Esc"),
+-            hint_text(" to clear · "),
+-            hint_key("q"),
+-            hint_text(" to quit"),
+-        ]),
+-        // Vim NORMAL mode: hjkl/arrows move, `/` searches.
+-        (true, _, None) => Line::from(vec![
+-            hint_key("hjkl"),
+-            hint_text(" to move · "),
+-            hint_key("/"),
+-            hint_text(" to search · "),
+-            hint_key("Enter"),
+-            hint_text(" to switch · "),
+-            hint_key("q/Esc"),
+-            hint_text(" to quit"),
+-        ]),
+-        (false, _, Some(query)) => Line::from(vec![
+-            Span::styled(format!("Search: {query}"), Style::default().fg(Color::Cyan)),
+-            hint_text(" · type to filter · "),
+-            hint_key("Backspace"),
+-            hint_text(" to edit · "),
+-            hint_key("↑/↓/←/→"),
+-            hint_text(" to move · "),
+-            hint_key("Enter"),
+-            hint_text(" to switch · "),
+-            hint_key("Esc"),
+-            hint_text(" to clear"),
+-        ]),
+-        (false, _, None) => Line::from(vec![
+-            hint_text("type to filter · "),
+-            hint_key("↑/↓/←/→"),
+-            hint_text(" to move · "),
+-            hint_key("Enter"),
+-            hint_text(" to switch · "),
+-            hint_key("Esc/Ctrl-C"),
+-            hint_text(" to quit"),
+-        ]),
+-    }
++fn footer_hint_line() -> Line<'static> {
++    Line::from(vec![
++        hint_key("↑/↓/←/→"),
++        hint_text(" to move · "),
++        hint_key("Alt-1…9"),
++        hint_text(" to switch directly · "),
++        hint_key("Enter"),
++        hint_text(" to switch · "),
++        hint_key("Esc/Ctrl-C"),
++        hint_text(" to quit"),
++    ])
+ }
+ 
+ fn hint_key(value: &'static str) -> Span<'static> {
+@@ -691,10 +628,50 @@ fn ansi_color(index: u16, bright: bool) -> Color {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use ratatui::layout::Rect;
++    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+ 
+     use super::*;
+ 
++    #[test]
++    fn card_has_a_full_border() {
++        let backend = TestBackend::new(30, 6);
++        let mut terminal = Terminal::new(backend).unwrap();
++        let pane = Session {
++            id: "%1".to_string(),
++            window_id: "@1".to_string(),
++            name: "demo".to_string(),
++            attached: false,
++            bell: false,
++            preview: vec!["preview".to_string()],
++            preview_error: None,
++        };
++
++        terminal
++            .draw(|frame| {
++                render_card(
++                    frame,
++                    &pane,
++                    false,
++                    false,
++                    CardColors::default(),
++                    frame.area(),
++                );
++            })
++            .unwrap();
++
++        let buffer = terminal.backend().buffer();
++        let row = |y| (0..30).map(|x| buffer[(x, y)].symbol()).collect::<String>();
++        assert!(row(0).contains("demo"));
++        assert_eq!(buffer[(0, 0)].symbol(), "┌");
++        assert_eq!(buffer[(29, 0)].symbol(), "┐");
++        assert_eq!(buffer[(0, 1)].symbol(), "│");
++        assert_eq!(buffer[(29, 1)].symbol(), "│");
++        assert!(row(1).contains("preview"));
++        assert_eq!(buffer[(0, 5)].symbol(), "└");
++        assert_eq!(buffer[(29, 5)].symbol(), "┘");
++        assert!(row(5).contains("inactive"));
++    }
++
+     #[test]
+     fn grid_fits_default_cards_to_available_screen_space() {
+         let grid = calculate_grid(Rect::new(0, 0, 100, 30), 8, None, None);
+@@ -886,12 +863,18 @@ mod tests {
+             card_border_style(true, false, false, colors).fg,
+             Some(Color::Gray)
+         );
+-        assert_eq!(card_title_style(false, true, colors).fg, Some(Color::Blue));
++        assert_eq!(
++            card_title_style(false, true, colors).fg,
++            Some(Color::Blue)
++        );
+         assert_eq!(
+             card_border_style(false, true, false, colors).fg,
+             Some(Color::Blue)
+         );
+-        assert_eq!(card_title_style(false, false, colors).fg, Some(Color::Cyan));
++        assert_eq!(
++            card_title_style(false, false, colors).fg,
++            Some(Color::Cyan)
++        );
+         // Unselected, inactive borders stay dimmed regardless of the configured color.
+         assert_eq!(
+             card_border_style(false, false, false, colors).fg,
+@@ -914,7 +897,7 @@ mod tests {
+ 
+     #[test]
+     fn footer_highlights_shortcuts_only() {
+-        let line = footer_hint_line(None, false, false);
++        let line = footer_hint_line();
+ 
+         let shortcut_spans: Vec<&Span<'_>> = line
+             .spans
+@@ -926,7 +909,10 @@ mod tests {
+             .map(|span| span.content.as_ref())
+             .collect();
+ 
+-        assert_eq!(shortcut_text, vec!["↑/↓/←/→", "Enter", "Esc/Ctrl-C"]);
++        assert_eq!(
++            shortcut_text,
++            vec!["↑/↓/←/→", "Alt-1…9", "Enter", "Esc/Ctrl-C"]
++        );
+         assert!(
+             shortcut_spans
+                 .iter()
+@@ -940,66 +926,6 @@ mod tests {
+         );
+     }
+ 
+-    #[test]
+-    fn search_footer_highlights_search_shortcuts() {
+-        let line = footer_hint_line(Some("api"), false, true);
+-
+-        let shortcut_text: Vec<&str> = line
+-            .spans
+-            .iter()
+-            .filter(|span| span.style.fg == Some(Color::Yellow))
+-            .map(|span| span.content.as_ref())
+-            .collect();
+-
+-        assert_eq!(shortcut_text, vec!["Backspace", "↑/↓/←/→", "Enter", "Esc"]);
+-        assert_eq!(line.spans[0].content, "Search: api");
+-        assert_eq!(line.spans[0].style.fg, Some(Color::Cyan));
+-    }
+-
+-    #[test]
+-    fn vim_normal_footer_highlights_vim_shortcuts() {
+-        let line = footer_hint_line(None, true, false);
+-
+-        let shortcut_text: Vec<&str> = line
+-            .spans
+-            .iter()
+-            .filter(|span| span.style.fg == Some(Color::Yellow))
+-            .map(|span| span.content.as_ref())
+-            .collect();
+-
+-        assert_eq!(shortcut_text, vec!["hjkl", "/", "Enter", "q/Esc"]);
+-    }
+-
+-    #[test]
+-    fn vim_search_footer_offers_return_to_normal() {
+-        let line = footer_hint_line(Some("api"), true, true);
+-
+-        let shortcut_text: Vec<&str> = line
+-            .spans
+-            .iter()
+-            .filter(|span| span.style.fg == Some(Color::Yellow))
+-            .map(|span| span.content.as_ref())
+-            .collect();
+-
+-        assert_eq!(shortcut_text, vec!["Backspace", "Enter", "Esc"]);
+-        assert_eq!(line.spans[0].content, "Search: api");
+-    }
+-
+-    #[test]
+-    fn vim_normal_footer_with_committed_filter_offers_clear_and_edit() {
+-        let line = footer_hint_line(Some("api"), true, false);
+-
+-        let shortcut_text: Vec<&str> = line
+-            .spans
+-            .iter()
+-            .filter(|span| span.style.fg == Some(Color::Yellow))
+-            .map(|span| span.content.as_ref())
+-            .collect();
+-
+-        assert_eq!(shortcut_text, vec!["hjkl", "/", "Enter", "Esc", "q"]);
+-        assert_eq!(line.spans[0].content, "Filter: api");
+-    }
+-
+     #[test]
+     fn ansi_foreground_colors_become_styled_spans() {
+         let line = ansi_to_line("plain \u{1b}[31mred\u{1b}[0m done");
+@@ -1022,19 +948,28 @@ mod tests {
+ 
+     #[test]
+     fn osc_hyperlinks_are_removed_before_truncation_and_rendering() {
+-        let value = "opis \u{1b}]8;;https://github.com/example/pull/1\u{1b}\\PR #1\u{1b}]8;;\u{1b}\\ dalej";
++        let value =
++            "opis \u{1b}]8;;https://github.com/example/pull/1\u{1b}\\PR #1\u{1b}]8;;\u{1b}\\ dalej";
+         let truncated = truncate_ansi(value, 12);
+ 
+         assert_eq!(truncated, "opis PR #1 d");
+         let line = ansi_to_line(&truncated);
+-        let rendered: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
++        let rendered: String = line
++            .spans
++            .iter()
++            .map(|span| span.content.as_ref())
++            .collect();
+         assert_eq!(rendered, "opis PR #1 d");
+     }
+ 
+     #[test]
+     fn embedded_control_characters_are_not_rendered() {
+         let line = ansi_to_line("before\rafter\u{7}");
+-        let rendered: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
++        let rendered: String = line
++            .spans
++            .iter()
++            .map(|span| span.content.as_ref())
++            .collect();
+ 
+         assert_eq!(rendered, "beforeafter");
+     }
+diff --git a/tests/plugin_entrypoint_test.sh b/tests/plugin_entrypoint_test.sh
+index 1bb3747..9f55820 100644
+--- a/tests/plugin_entrypoint_test.sh
++++ b/tests/plugin_entrypoint_test.sh
+@@ -25,7 +25,6 @@ if [[ "$1" == "show-option" ]]; then
+     @tmux-expose-selected-color) printf '%s' "${TMUX_EXPOSE_TEST_SELECTED_COLOR:-}" ;;
+     @tmux-expose-attached-color) printf '%s' "${TMUX_EXPOSE_TEST_ATTACHED_COLOR:-}" ;;
+     @tmux-expose-inactive-color) printf '%s' "${TMUX_EXPOSE_TEST_INACTIVE_COLOR:-}" ;;
+-    @tmux-expose-vim-keys) printf '%s' "${TMUX_EXPOSE_TEST_VIM_KEYS:-}" ;;
+     @tmux-expose-command) printf '%s' "${TMUX_EXPOSE_TEST_COMMAND:-}" ;;
+   esac
+   exit 0
+@@ -46,7 +45,6 @@ FAKE_TMUX
+     TMUX_EXPOSE_TEST_SELECTED_COLOR="${TMUX_EXPOSE_TEST_SELECTED_COLOR:-}" \
+     TMUX_EXPOSE_TEST_ATTACHED_COLOR="${TMUX_EXPOSE_TEST_ATTACHED_COLOR:-}" \
+     TMUX_EXPOSE_TEST_INACTIVE_COLOR="${TMUX_EXPOSE_TEST_INACTIVE_COLOR:-}" \
+-    TMUX_EXPOSE_TEST_VIM_KEYS="${TMUX_EXPOSE_TEST_VIM_KEYS:-}" \
+     TMUX_EXPOSE_TEST_COMMAND="${TMUX_EXPOSE_TEST_COMMAND:-}" \
+     PATH="${tmpdir}:${PATH}" \
+     bash "${repo_root}/tmux.expose.tmux"
+@@ -107,12 +105,3 @@ assert_equals \
+ assert_equals \
+   'bind-key -T root M-e display-popup -w 100% -h 100% -e TMUX_EXPOSE_TOGGLE_KEY=M-e -E tmux-expose\ --selected-color\ \\#ff8700 ' \
+   "$(TMUX_EXPOSE_TEST_SELECTED_COLOR='#ff8700' run_plugin)"
+-
+-assert_equals \
+-  'bind-key -T root M-e display-popup -w 100% -h 100% -e TMUX_EXPOSE_TOGGLE_KEY=M-e -E tmux-expose\ --vim ' \
+-  "$(TMUX_EXPOSE_TEST_VIM_KEYS=on run_plugin)"
+-
+-# An "off"/unset value must not append the flag.
+-assert_equals \
+-  'bind-key -T root M-e display-popup -w 100% -h 100% -e TMUX_EXPOSE_TOGGLE_KEY=M-e -E tmux-expose ' \
+-  "$(TMUX_EXPOSE_TEST_VIM_KEYS=off run_plugin)"
+diff --git a/tmux.expose.tmux b/tmux.expose.tmux
+index 3ec87b5..95667a3 100755
+--- a/tmux.expose.tmux
++++ b/tmux.expose.tmux
+@@ -12,7 +12,6 @@ border_style="$(tmux show-option -gqv @tmux-expose-border-style)"
+ selected_color="$(tmux show-option -gqv @tmux-expose-selected-color)"
+ attached_color="$(tmux show-option -gqv @tmux-expose-attached-color)"
+ inactive_color="$(tmux show-option -gqv @tmux-expose-inactive-color)"
+-vim_keys="$(tmux show-option -gqv @tmux-expose-vim-keys)"
+ command="$(tmux show-option -gqv @tmux-expose-command)"
+ 
+ if [[ -z "${key}" ]]; then
+@@ -42,10 +41,6 @@ if [[ -n "${inactive_color}" ]]; then
+   command="${command} --inactive-color $(printf '%q' "${inactive_color}")"
+ fi
+ 
+-case "$(printf '%s' "${vim_keys}" | tr '[:upper:]' '[:lower:]')" in
+-  on|true|1|yes) command="${command} --vim" ;;
+-esac
+-
+ position_args=()
+ case "${anchor}" in
+   center) ;;

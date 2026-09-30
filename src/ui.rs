@@ -68,10 +68,8 @@ pub fn render(
         render_centered_message(
             frame,
             chunks[0],
-            "No tmux panes found.\nPress q or Esc to quit.",
+            "No tmux panes found.\nPress Esc or Ctrl-C to quit.",
         );
-    } else if app.visible_session_count() == 0 {
-        render_centered_message(frame, chunks[0], "No matching panes");
     } else {
         render_grid(
             frame,
@@ -83,11 +81,7 @@ pub fn render(
         );
     }
 
-    let footer = Paragraph::new(footer_hint_line(
-        app.search_text(),
-        app.vim_keys,
-        app.is_searching(),
-    ));
+    let footer = Paragraph::new(footer_hint_line());
     frame.render_widget(footer, chunks[1]);
 }
 
@@ -125,6 +119,7 @@ pub fn render_card(
     colors: CardColors,
     area: Rect,
 ) {
+    let border_style = card_border_style(selected, current_attached, session.bell, colors);
     let title = format!(
         " {} ",
         truncate(&session.name, area.width.saturating_sub(12) as usize)
@@ -138,12 +133,7 @@ pub fn render_card(
         .title_bottom(Line::from(bottom_spans).right_aligned())
         .borders(Borders::ALL)
         .border_type(card_border_type(session.bell))
-        .border_style(card_border_style(
-            selected,
-            current_attached,
-            session.bell,
-            colors,
-        ));
+        .border_style(border_style);
 
     let preview_height = area.height.saturating_sub(2) as usize;
     let mut lines = Vec::new();
@@ -277,70 +267,17 @@ fn session_status_span(attached: bool) -> Span<'static> {
     }
 }
 
-fn footer_hint_line(search_query: Option<&str>, vim_keys: bool, editing: bool) -> Line<'static> {
-    match (vim_keys, editing, search_query) {
-        // Vim SEARCH mode: typing filters; Esc commits it as a filter and
-        // drops into NORMAL mode instead of discarding it.
-        (true, true, Some(query)) => Line::from(vec![
-            Span::styled(format!("Search: {query}"), Style::default().fg(Color::Cyan)),
-            hint_text(" · type to filter · "),
-            hint_key("Backspace"),
-            hint_text(" to edit · "),
-            hint_key("Enter"),
-            hint_text(" to switch · "),
-            hint_key("Esc"),
-            hint_text(" to browse results"),
-        ]),
-        // Vim NORMAL mode with a filter committed from SEARCH mode: hjkl
-        // still moves over the filtered results; Esc clears the filter
-        // (a second Esc then quits, same as `q` always does in one).
-        (true, false, Some(query)) => Line::from(vec![
-            Span::styled(format!("Filter: {query}"), Style::default().fg(Color::Cyan)),
-            hint_text(" · "),
-            hint_key("hjkl"),
-            hint_text(" to move · "),
-            hint_key("/"),
-            hint_text(" to edit · "),
-            hint_key("Enter"),
-            hint_text(" to switch · "),
-            hint_key("Esc"),
-            hint_text(" to clear · "),
-            hint_key("q"),
-            hint_text(" to quit"),
-        ]),
-        // Vim NORMAL mode: hjkl/arrows move, `/` searches.
-        (true, _, None) => Line::from(vec![
-            hint_key("hjkl"),
-            hint_text(" to move · "),
-            hint_key("/"),
-            hint_text(" to search · "),
-            hint_key("Enter"),
-            hint_text(" to switch · "),
-            hint_key("q/Esc"),
-            hint_text(" to quit"),
-        ]),
-        (false, _, Some(query)) => Line::from(vec![
-            Span::styled(format!("Search: {query}"), Style::default().fg(Color::Cyan)),
-            hint_text(" · type to filter · "),
-            hint_key("Backspace"),
-            hint_text(" to edit · "),
-            hint_key("↑/↓/←/→"),
-            hint_text(" to move · "),
-            hint_key("Enter"),
-            hint_text(" to switch · "),
-            hint_key("Esc"),
-            hint_text(" to clear"),
-        ]),
-        (false, _, None) => Line::from(vec![
-            hint_text("type to filter · "),
-            hint_key("↑/↓/←/→"),
-            hint_text(" to move · "),
-            hint_key("Enter"),
-            hint_text(" to switch · "),
-            hint_key("Esc/Ctrl-C"),
-            hint_text(" to quit"),
-        ]),
-    }
+fn footer_hint_line() -> Line<'static> {
+    Line::from(vec![
+        hint_key("↑/↓/←/→"),
+        hint_text(" to move · "),
+        hint_key("Alt-1…9"),
+        hint_text(" to switch directly · "),
+        hint_key("Enter"),
+        hint_text(" to switch · "),
+        hint_key("Esc/Ctrl-C"),
+        hint_text(" to quit"),
+    ])
 }
 
 fn hint_key(value: &'static str) -> Span<'static> {
@@ -691,9 +628,49 @@ fn ansi_color(index: u16, bright: bool) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::layout::Rect;
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
     use super::*;
+
+    #[test]
+    fn card_has_a_full_border() {
+        let backend = TestBackend::new(30, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let pane = Session {
+            id: "%1".to_string(),
+            window_id: "@1".to_string(),
+            name: "demo".to_string(),
+            attached: false,
+            bell: false,
+            preview: vec!["preview".to_string()],
+            preview_error: None,
+        };
+
+        terminal
+            .draw(|frame| {
+                render_card(
+                    frame,
+                    &pane,
+                    false,
+                    false,
+                    CardColors::default(),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let row = |y| (0..30).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert!(row(0).contains("demo"));
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(29, 0)].symbol(), "┐");
+        assert_eq!(buffer[(0, 1)].symbol(), "│");
+        assert_eq!(buffer[(29, 1)].symbol(), "│");
+        assert!(row(1).contains("preview"));
+        assert_eq!(buffer[(0, 5)].symbol(), "└");
+        assert_eq!(buffer[(29, 5)].symbol(), "┘");
+        assert!(row(5).contains("inactive"));
+    }
 
     #[test]
     fn grid_fits_default_cards_to_available_screen_space() {
@@ -886,12 +863,18 @@ mod tests {
             card_border_style(true, false, false, colors).fg,
             Some(Color::Gray)
         );
-        assert_eq!(card_title_style(false, true, colors).fg, Some(Color::Blue));
+        assert_eq!(
+            card_title_style(false, true, colors).fg,
+            Some(Color::Blue)
+        );
         assert_eq!(
             card_border_style(false, true, false, colors).fg,
             Some(Color::Blue)
         );
-        assert_eq!(card_title_style(false, false, colors).fg, Some(Color::Cyan));
+        assert_eq!(
+            card_title_style(false, false, colors).fg,
+            Some(Color::Cyan)
+        );
         // Unselected, inactive borders stay dimmed regardless of the configured color.
         assert_eq!(
             card_border_style(false, false, false, colors).fg,
@@ -914,7 +897,7 @@ mod tests {
 
     #[test]
     fn footer_highlights_shortcuts_only() {
-        let line = footer_hint_line(None, false, false);
+        let line = footer_hint_line();
 
         let shortcut_spans: Vec<&Span<'_>> = line
             .spans
@@ -926,7 +909,10 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
 
-        assert_eq!(shortcut_text, vec!["↑/↓/←/→", "Enter", "Esc/Ctrl-C"]);
+        assert_eq!(
+            shortcut_text,
+            vec!["↑/↓/←/→", "Alt-1…9", "Enter", "Esc/Ctrl-C"]
+        );
         assert!(
             shortcut_spans
                 .iter()
@@ -938,66 +924,6 @@ mod tests {
                 .filter(|span| span.style.fg != Some(Color::Yellow))
                 .all(|span| span.style.fg == Some(Color::DarkGray))
         );
-    }
-
-    #[test]
-    fn search_footer_highlights_search_shortcuts() {
-        let line = footer_hint_line(Some("api"), false, true);
-
-        let shortcut_text: Vec<&str> = line
-            .spans
-            .iter()
-            .filter(|span| span.style.fg == Some(Color::Yellow))
-            .map(|span| span.content.as_ref())
-            .collect();
-
-        assert_eq!(shortcut_text, vec!["Backspace", "↑/↓/←/→", "Enter", "Esc"]);
-        assert_eq!(line.spans[0].content, "Search: api");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Cyan));
-    }
-
-    #[test]
-    fn vim_normal_footer_highlights_vim_shortcuts() {
-        let line = footer_hint_line(None, true, false);
-
-        let shortcut_text: Vec<&str> = line
-            .spans
-            .iter()
-            .filter(|span| span.style.fg == Some(Color::Yellow))
-            .map(|span| span.content.as_ref())
-            .collect();
-
-        assert_eq!(shortcut_text, vec!["hjkl", "/", "Enter", "q/Esc"]);
-    }
-
-    #[test]
-    fn vim_search_footer_offers_return_to_normal() {
-        let line = footer_hint_line(Some("api"), true, true);
-
-        let shortcut_text: Vec<&str> = line
-            .spans
-            .iter()
-            .filter(|span| span.style.fg == Some(Color::Yellow))
-            .map(|span| span.content.as_ref())
-            .collect();
-
-        assert_eq!(shortcut_text, vec!["Backspace", "Enter", "Esc"]);
-        assert_eq!(line.spans[0].content, "Search: api");
-    }
-
-    #[test]
-    fn vim_normal_footer_with_committed_filter_offers_clear_and_edit() {
-        let line = footer_hint_line(Some("api"), true, false);
-
-        let shortcut_text: Vec<&str> = line
-            .spans
-            .iter()
-            .filter(|span| span.style.fg == Some(Color::Yellow))
-            .map(|span| span.content.as_ref())
-            .collect();
-
-        assert_eq!(shortcut_text, vec!["hjkl", "/", "Enter", "Esc", "q"]);
-        assert_eq!(line.spans[0].content, "Filter: api");
     }
 
     #[test]
@@ -1022,19 +948,28 @@ mod tests {
 
     #[test]
     fn osc_hyperlinks_are_removed_before_truncation_and_rendering() {
-        let value = "opis \u{1b}]8;;https://github.com/example/pull/1\u{1b}\\PR #1\u{1b}]8;;\u{1b}\\ dalej";
+        let value =
+            "opis \u{1b}]8;;https://github.com/example/pull/1\u{1b}\\PR #1\u{1b}]8;;\u{1b}\\ dalej";
         let truncated = truncate_ansi(value, 12);
 
         assert_eq!(truncated, "opis PR #1 d");
         let line = ansi_to_line(&truncated);
-        let rendered: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        let rendered: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
         assert_eq!(rendered, "opis PR #1 d");
     }
 
     #[test]
     fn embedded_control_characters_are_not_rendered() {
         let line = ansi_to_line("before\rafter\u{7}");
-        let rendered: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        let rendered: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
 
         assert_eq!(rendered, "beforeafter");
     }

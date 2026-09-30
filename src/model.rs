@@ -19,16 +19,6 @@ pub struct App {
     pub should_quit: bool,
     pub should_switch: bool,
     pub error: Option<String>,
-    /// When true, the picker uses modal vim navigation (hjkl to move, `/` to search).
-    pub vim_keys: bool,
-    search_query: Option<String>,
-    /// True while actively typing a query. In vim mode this is distinct from
-    /// `search_query` being set: Esc leaves editing (so hjkl moves again) but
-    /// keeps `search_query` as an applied filter, matching how Telescope-style
-    /// pickers commit a search into normal-mode browsing instead of discarding
-    /// it. Default mode has no normal-mode navigation to return to, so the two
-    /// always stay in lockstep there — see `is_searching`.
-    editing_search: bool,
 }
 
 impl App {
@@ -45,9 +35,6 @@ impl App {
             should_quit: false,
             should_switch: false,
             error: None,
-            vim_keys: false,
-            search_query: None,
-            editing_search: false,
         }
     }
 
@@ -56,64 +43,11 @@ impl App {
     }
 
     pub fn visible_sessions(&self) -> Vec<&Session> {
-        match self.search_query.as_deref() {
-            Some(query) => self
-                .sessions
-                .iter()
-                .filter(|session| fuzzy_matches(&session.name, query))
-                .collect(),
-            None => self.sessions.iter().collect(),
-        }
+        self.sessions.iter().collect()
     }
 
     pub fn visible_session_count(&self) -> usize {
-        self.visible_sessions().len()
-    }
-
-    pub fn start_search(&mut self) {
-        self.search_query = Some(String::new());
-        self.editing_search = true;
-        self.selected_index = 0;
-    }
-
-    pub fn push_search_char(&mut self, ch: char) {
-        if let Some(query) = &mut self.search_query {
-            query.push(ch);
-            self.selected_index = 0;
-        }
-    }
-
-    pub fn pop_search_char(&mut self) {
-        if let Some(query) = &mut self.search_query {
-            query.pop();
-            self.selected_index = 0;
-        }
-    }
-
-    pub fn clear_search(&mut self) {
-        self.search_query = None;
-        self.editing_search = false;
-        self.selected_index = 0;
-    }
-
-    /// Leaves text-entry but keeps `search_query` as an applied filter — vim
-    /// mode's Esc-while-searching, so hjkl navigates the filtered results
-    /// instead of discarding them.
-    pub fn stop_editing_search(&mut self) {
-        self.editing_search = false;
-    }
-
-    /// Whether keystrokes should be treated as search text-entry right now.
-    /// Also drives the toggle-key/typeable-filter check in `input.rs`. In
-    /// vim mode this is `false` while a filter is applied but not being
-    /// edited; in default mode it always matches `search_query.is_some()`,
-    /// since default mode has no normal-mode navigation to drop into.
-    pub fn is_searching(&self) -> bool {
-        self.editing_search
-    }
-
-    pub fn search_text(&self) -> Option<&str> {
-        self.search_query.as_deref()
+        self.sessions.len()
     }
 
     pub fn replace_sessions(&mut self, sessions: Vec<Session>) {
@@ -194,19 +128,6 @@ impl App {
             self.selected_index = self.selected_index.saturating_add(columns).min(last_index);
         }
     }
-}
-
-fn fuzzy_matches(name: &str, query: &str) -> bool {
-    let query = query.to_lowercase();
-    if query.is_empty() {
-        return true;
-    }
-
-    let name = name.to_lowercase();
-    let mut name_chars = name.chars();
-    query
-        .chars()
-        .all(|query_ch| name_chars.any(|name_ch| name_ch == query_ch))
 }
 
 #[cfg(test)]
@@ -299,55 +220,6 @@ mod tests {
         assert_eq!(app.sessions[0].preview, vec!["snapshot".to_string()]);
         assert_eq!(app.sessions[0].preview_error, None);
         assert_eq!(app.sessions[1].preview, vec!["live".to_string()]);
-    }
-
-    #[test]
-    fn search_filters_sessions_by_fuzzy_name() {
-        let mut app = App::new(
-            vec![
-                session("backend-api"),
-                session("frontend"),
-                session("database"),
-            ],
-            None,
-        );
-
-        app.start_search();
-        app.push_search_char('b');
-        app.push_search_char('a');
-
-        let names: Vec<&str> = app
-            .visible_sessions()
-            .into_iter()
-            .map(|session| session.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["backend-api", "database"]);
-    }
-
-    #[test]
-    fn selected_session_uses_filtered_selection() {
-        let mut app = App::new(
-            vec![session("backend"), session("frontend"), session("database")],
-            None,
-        );
-
-        app.start_search();
-        app.push_search_char('f');
-
-        assert_eq!(app.selected_index, 0);
-        assert_eq!(app.selected_session().unwrap().name, "frontend");
-    }
-
-    #[test]
-    fn clearing_search_restores_all_sessions() {
-        let mut app = App::new(vec![session("backend"), session("frontend")], None);
-
-        app.start_search();
-        app.push_search_char('f');
-        app.clear_search();
-
-        assert!(!app.is_searching());
-        assert_eq!(app.visible_session_count(), 2);
     }
 
     #[test]

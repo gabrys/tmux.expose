@@ -36,10 +36,6 @@ struct Cli {
 
     #[arg(long, value_name = "COLOR", value_parser = parse_color)]
     inactive_color: Option<Color>,
-
-    /// Use modal vim navigation: hjkl to move, `/` to search, q/Esc to quit.
-    #[arg(long)]
-    vim: bool,
 }
 
 fn parse_color(value: &str) -> Result<Color, String> {
@@ -95,12 +91,10 @@ fn main() -> Result<()> {
         Ok(panes) => App::new(panes, current_pane_id.clone()),
         Err(error) => {
             let mut app = App::new(Vec::new(), current_pane_id.clone());
-            app.error = Some(format!("{error}\n\nPress q or Esc to quit."));
+            app.error = Some(format!("{error}\n\nPress Esc or Ctrl-C to quit."));
             app
         }
     };
-    app.vim_keys = cli.vim;
-
     let mut colors = ui::CardColors::default();
     if let Some(color) = cli.selected_color {
         colors.selected = color;
@@ -147,7 +141,7 @@ fn main() -> Result<()> {
                 match tmux::select_pane(&selected_window, &selected_pane) {
                     Ok(()) => break,
                     Err(error) => {
-                        app.error = Some(format!("{error}\n\nPress q or Esc to quit."));
+                        app.error = Some(format!("{error}\n\nPress Esc or Ctrl-C to quit."));
                         app.should_switch = false;
                     }
                 }
@@ -190,14 +184,11 @@ fn main() -> Result<()> {
         if last_refresh.elapsed() >= refresh_interval {
             match tmux::list_panes_skipping_preview_for(current_pane_id.as_deref()) {
                 Ok(panes) => {
-                    app.replace_sessions_preserving_preview_for(
-                        panes,
-                        current_pane_id.as_deref(),
-                    );
+                    app.replace_sessions_preserving_preview_for(panes, current_pane_id.as_deref());
                     app.error = None;
                 }
                 Err(error) => {
-                    app.error = Some(format!("{error}\n\nPress q or Esc to quit."));
+                    app.error = Some(format!("{error}\n\nPress Esc or Ctrl-C to quit."));
                 }
             }
             last_refresh = Instant::now();
@@ -324,19 +315,5 @@ mod tests {
         // `colour` prefix with a non-numeric / out-of-range suffix is still invalid.
         assert!(parse_color("colourize").is_err());
         assert!(parse_color("colour999").is_err());
-    }
-
-    #[test]
-    fn vim_defaults_to_off() {
-        let cli = Cli::parse_from(["tmux-expose"]);
-
-        assert!(!cli.vim);
-    }
-
-    #[test]
-    fn parses_vim_flag() {
-        let cli = Cli::parse_from(["tmux-expose", "--vim"]);
-
-        assert!(cli.vim);
     }
 }
